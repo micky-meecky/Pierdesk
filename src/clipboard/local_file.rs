@@ -1,0 +1,1498 @@
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::os::windows::ffi::OsStringExt as _;
+use std::os::windows::fs::{FileExt as _, OpenOptionsExt as _};
+use std::os::windows::io::AsRawHandle as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use windows::Win32::Foundation::{
+    E_INVALIDARG, E_UNEXPECTED, ERROR_FILE_INVALID, ERROR_TIMEOUT, FILETIME, HANDLE, HGLOBAL, HWND,
+};
+use windows::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TYPE_DISK, GetFileAttributesW, GetFileInformationByHandle, GetFileType,
+    INVALID_FILE_ATTRIBUTES,
+};
+use windows::Win32::System::Com::CoCreateGuid;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+    OpenClipboard, RegisterClipboardFormatW,
+};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_MOVE};
+use windows::Win32::UI::Shell::{CFSTR_PREFERREDDROPEFFECT, DragQueryFileW, HDROP};
+use windows::core::{Error, GUID, HRESULT, PCWSTR, Result, w};
+
+use super::data_object::{
+    MAX_TOTAL_VIRTUAL_PATH_U16, MAX_VIRTUAL_DEPTH, MAX_VIRTUAL_ITEMS, VirtualFileDescriptor,
+    validate_virtual_descriptor_tree, validate_virtual_file_name, validate_virtual_path,
+};
+use super::source::ReadAtSource;
+
+const MAX_CAPTURE_PATH_U16: usize = 32_767;
+const MAX_CAPTURE_ROOTS: usize = 256;
+const PRIVATE_ORIGIN_FORMAT: PCWSTR = w!("ClipFerry.SourceOffer.v1");
+const PRIVATE_ORIGIN_PREFIX: &[u8] = b"ClipFerry.SourceOffer.v1\0";
+
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureFormats {
+    preferred_effect: u32,
+    private_origin: u32,
+}
+
+impl CaptureFormats {
+    pub fn register() -> Result<Self> {
+        let preferred_effect = unsafe { RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT) };
+        let private_origin = unsafe { RegisterClipboardFormatW(PRIVATE_ORIGIN_FORMAT) };
+        if preferred_effect == 0 || private_origin == 0 {
+            return Err(Error::from_thread());
+        }
+        Ok(Self {
+            preferred_effect,
+            private_origin,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum ClipboardCapture {
+    Candidates { paths: Vec<PathBuf>, sequence: u32 },
+    NotFileClipboard,
+    PrivateOffer,
+    Rejected(CaptureRejection),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureRejection {
+    MissingCopyEffect,
+    CutOperation,
+    TooManyItems,
+    TreeTooDeep,
+    ManifestTooLarge,
+    InvalidPath,
+    NonUnicodeName,
+    Directory,
+    NonDiskFile,
+}
+
+impl CaptureRejection {
+    #[must_use]
+    pub const fn user_message(self) -> &'static str {
+        match self {
+            Self::MissingCopyEffect => {
+                "剪贴板来源没有标明这是“复制”还是“剪切”。为避免误操作，Pierdesk 未发送；请在文件资源管理器中使用 Ctrl+C 后重试。"
+            }
+            Self::CutOperation => "检测到剪切操作。Pierdesk 只发送复制的文件，请改用 Ctrl+C。",
+            Self::TooManyItems => "一次选择的项目过多，请减少项目数量后重试。",
+            Self::TreeTooDeep => "文件夹层级过深，无法安全生成传输清单。",
+            Self::ManifestTooLarge => "文件清单过大，无法安全传输。",
+            Self::InvalidPath => "剪贴板中包含无效或不完整的文件路径。",
+            Self::NonUnicodeName => "文件名无法用 Windows Unicode 路径表示。",
+            Self::Directory => "当前操作不支持直接读取这个目录。",
+            Self::NonDiskFile => "所选内容不是本机磁盘上的普通文件。",
+        }
+    }
+}
+
+impl fmt::Display for CaptureRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::MissingCopyEffect => "missing-copy-effect",
+            Self::CutOperation => "cut-operation",
+            Self::TooManyItems => "too-many-items",
+            Self::TreeTooDeep => "tree-too-deep",
+            Self::ManifestTooLarge => "manifest-too-large",
+            Self::InvalidPath => "invalid-path",
+            Self::NonUnicodeName => "non-unicode-name",
+            Self::Directory => "directory",
+            Self::NonDiskFile => "non-disk-file",
+        };
+        formatter.write_str(text)
+    }
+}
+
+#[derive(Debug)]
+pub enum CaptureError {
+    Windows(Error),
+    Rejected(CaptureRejection),
+}
+
+impl fmt::Display for CaptureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Windows(error) => write!(formatter, "{error} ({:#010X})", error.code().0),
+            Self::Rejected(reason) => write!(formatter, "rejected: {reason}"),
+        }
+    }
+}
+
+impl From<Error> for CaptureError {
+    fn from(error: Error) -> Self {
+        Self::Windows(error)
+    }
+}
+
+pub fn capture_files_from_clipboard(
+    owner: HWND,
+    formats: CaptureFormats,
+) -> std::result::Result<ClipboardCapture, CaptureError> {
+    let _clipboard = ClipboardGuard::open(Some(owner))?;
+    let sequence = unsafe { GetClipboardSequenceNumber() };
+    if unsafe { IsClipboardFormatAvailable(formats.private_origin) }.is_ok()
+        && read_private_origin(formats.private_origin)
+    {
+        return Ok(ClipboardCapture::PrivateOffer);
+    }
+    if unsafe { IsClipboardFormatAvailable(u32::from(CF_HDROP.0)) }.is_err() {
+        return Ok(ClipboardCapture::NotFileClipboard);
+    }
+    if unsafe { IsClipboardFormatAvailable(formats.preferred_effect) }.is_err() {
+        return Ok(ClipboardCapture::Rejected(
+            CaptureRejection::MissingCopyEffect,
+        ));
+    }
+    let effect = read_drop_effect(formats.preferred_effect)?;
+    if let Err(reason) = validate_drop_effect(effect) {
+        return Ok(ClipboardCapture::Rejected(reason));
+    }
+
+    let handle = unsafe { GetClipboardData(u32::from(CF_HDROP.0)) }?;
+    let drop = HDROP(handle.0);
+    let count = usize::try_from(unsafe { DragQueryFileW(drop, u32::MAX, None) })
+        .map_err(|_| CaptureError::Rejected(CaptureRejection::InvalidPath))?;
+    if count == 0 || count > MAX_CAPTURE_ROOTS {
+        return Ok(ClipboardCapture::Rejected(CaptureRejection::TooManyItems));
+    }
+    let mut paths = Vec::with_capacity(count);
+    for index in 0..count {
+        let index = u32::try_from(index)
+            .map_err(|_| CaptureError::Rejected(CaptureRejection::TooManyItems))?;
+        let length = usize::try_from(unsafe { DragQueryFileW(drop, index, None) })
+            .map_err(|_| CaptureError::Rejected(CaptureRejection::InvalidPath))?;
+        if length == 0 || length > MAX_CAPTURE_PATH_U16 {
+            return Ok(ClipboardCapture::Rejected(CaptureRejection::InvalidPath));
+        }
+        let mut buffer = vec![0_u16; length + 1];
+        let copied = usize::try_from(unsafe { DragQueryFileW(drop, index, Some(&mut buffer)) })
+            .map_err(|_| CaptureError::Rejected(CaptureRejection::InvalidPath))?;
+        if copied != length || buffer[length] != 0 {
+            return Ok(ClipboardCapture::Rejected(CaptureRejection::InvalidPath));
+        }
+        let path = PathBuf::from(OsString::from_wide(&buffer[..length]));
+        if !path.is_absolute() {
+            return Ok(ClipboardCapture::Rejected(CaptureRejection::InvalidPath));
+        }
+        paths.push(path);
+    }
+    Ok(ClipboardCapture::Candidates { paths, sequence })
+}
+
+fn validate_drop_effect(effect: u32) -> std::result::Result<(), CaptureRejection> {
+    if effect & DROPEFFECT_MOVE.0 != 0 {
+        return Err(CaptureRejection::CutOperation);
+    }
+    if effect & DROPEFFECT_COPY.0 == 0 {
+        return Err(CaptureRejection::MissingCopyEffect);
+    }
+    Ok(())
+}
+
+pub(super) struct ClipboardGuard;
+
+impl ClipboardGuard {
+    pub(super) fn open(owner: Option<HWND>) -> Result<Self> {
+        const BACKOFF: [Duration; 8] = [
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+            Duration::from_millis(80),
+            Duration::from_millis(120),
+            Duration::from_millis(160),
+            Duration::from_millis(200),
+        ];
+        let mut last_error = Error::from_hresult(E_UNEXPECTED);
+        for (index, delay) in BACKOFF.into_iter().enumerate() {
+            match unsafe { OpenClipboard(owner) } {
+                Ok(()) => return Ok(Self),
+                Err(error) => last_error = error,
+            }
+            if index + 1 != BACKOFF.len() {
+                std::thread::sleep(delay);
+            }
+        }
+        Err(last_error)
+    }
+}
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseClipboard() };
+    }
+}
+
+fn read_drop_effect(format: u32) -> Result<u32> {
+    let handle = unsafe { GetClipboardData(format) }?;
+    let global = HGLOBAL(handle.0);
+    if unsafe { GlobalSize(global) } < size_of::<u32>() {
+        return Err(Error::from_hresult(E_INVALIDARG));
+    }
+    let pointer = unsafe { GlobalLock(global) };
+    if pointer.is_null() {
+        return Err(Error::from_thread());
+    }
+    let effect = unsafe { pointer.cast::<u32>().read_unaligned() };
+    let _ = unsafe { GlobalUnlock(global) };
+    Ok(effect)
+}
+
+fn read_private_origin(format: u32) -> bool {
+    let Ok(handle) = (unsafe { GetClipboardData(format) }) else {
+        return false;
+    };
+    let global = HGLOBAL(handle.0);
+    let expected_length = PRIVATE_ORIGIN_PREFIX.len() + 16;
+    if unsafe { GlobalSize(global) } != expected_length {
+        return false;
+    }
+    let pointer = unsafe { GlobalLock(global) };
+    if pointer.is_null() {
+        return false;
+    }
+    let payload = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), expected_length) };
+    let valid = is_private_origin_payload(payload);
+    let _ = unsafe { GlobalUnlock(global) };
+    valid
+}
+
+fn is_private_origin_payload(payload: &[u8]) -> bool {
+    payload.len() == PRIVATE_ORIGIN_PREFIX.len() + 16 && payload.starts_with(PRIVATE_ORIGIN_PREFIX)
+}
+
+const fn size_of<T>() -> usize {
+    std::mem::size_of::<T>()
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FileIdentity {
+    volume_serial: u32,
+    file_index: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileSnapshot {
+    path: PathBuf,
+    file_name: Arc<str>,
+    size: u64,
+    attributes: u32,
+    creation_time: FILETIME,
+    last_access_time: FILETIME,
+    last_write_time: FILETIME,
+    identity: FileIdentity,
+}
+
+impl FileSnapshot {
+    #[cfg(test)]
+    pub fn capture(path: &Path) -> std::result::Result<Self, CaptureError> {
+        if !path.is_absolute() {
+            return Err(CaptureError::Rejected(CaptureRejection::InvalidPath));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(CaptureError::Rejected(CaptureRejection::NonUnicodeName))?;
+        validate_virtual_file_name(file_name).map_err(CaptureError::Windows)?;
+        Self::capture_at(path, Arc::from(file_name), false)
+    }
+
+    fn capture_at(
+        path: &Path,
+        virtual_path: Arc<str>,
+        allow_directory: bool,
+    ) -> std::result::Result<Self, CaptureError> {
+        if !path.is_absolute() {
+            return Err(CaptureError::Rejected(CaptureRejection::InvalidPath));
+        }
+        validate_virtual_path(&virtual_path).map_err(CaptureError::Windows)?;
+
+        // Opening a directory for ordinary file reads fails with ACCESS_DENIED
+        // before a handle-based attribute check is possible. A bounded
+        // preflight gives callers the intended policy error; the handle check
+        // below remains authoritative for replacement races.
+        let wide = path_wide(path).map_err(CaptureError::Windows)?;
+        let path_attributes = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+        if path_attributes == INVALID_FILE_ATTRIBUTES {
+            return Err(CaptureError::Windows(Error::from_thread()));
+        }
+        reject_attributes_for_capture(path_attributes, allow_directory)
+            .map_err(CaptureError::Rejected)?;
+
+        let file = open_snapshot_handle(path).map_err(CaptureError::Windows)?;
+        let information = information_for(&file).map_err(CaptureError::Windows)?;
+        reject_attributes_for_capture(information.dwFileAttributes, allow_directory)
+            .map_err(CaptureError::Rejected)?;
+        let file_type = unsafe { GetFileType(file_handle(&file)) };
+        if file_type != FILE_TYPE_DISK {
+            return Err(CaptureError::Rejected(CaptureRejection::NonDiskFile));
+        }
+        Ok(Self::from_information(
+            path.to_path_buf(),
+            virtual_path,
+            information,
+        ))
+    }
+
+    fn from_information(
+        path: PathBuf,
+        file_name: Arc<str>,
+        information: BY_HANDLE_FILE_INFORMATION,
+    ) -> Self {
+        // NTFS is allowed to report an implementation-defined stream size for a directory. That
+        // value is not transferable file content and Windows' virtual-file descriptor contract
+        // requires directory sizes to be zero. Normalizing at capture time also keeps offer totals
+        // and later descriptor validation independent of the source volume's directory layout.
+        let size = if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+            0
+        } else {
+            file_size(&information)
+        };
+        Self {
+            path,
+            file_name,
+            size,
+            attributes: information.dwFileAttributes,
+            creation_time: information.ftCreationTime,
+            last_access_time: information.ftLastAccessTime,
+            last_write_time: information.ftLastWriteTime,
+            identity: file_identity(&information),
+        }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn file_name(&self) -> &Arc<str> {
+        &self.file_name
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub fn is_directory(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
+    }
+
+    fn descriptor(&self) -> VirtualFileDescriptor {
+        VirtualFileDescriptor {
+            file_name: Arc::clone(&self.file_name),
+            size: self.size,
+            attributes: transferable_attributes(self.attributes),
+            creation_time: Some(self.creation_time),
+            last_access_time: Some(self.last_access_time),
+            last_write_time: Some(self.last_write_time),
+        }
+    }
+
+    fn matches(&self, information: &BY_HANDLE_FILE_INFORMATION) -> bool {
+        // The path must still name the same file and its advertised size must remain valid. Attribute
+        // and timestamp changes are intentionally tolerated: adding an ADS, hydrating a cloud file,
+        // or changing ordinary metadata must not turn a valid copy into a policy failure.
+        self.size == file_size(information) && self.identity == file_identity(information)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FileTreeSnapshot {
+    entries: Arc<[FileSnapshot]>,
+}
+
+impl FileTreeSnapshot {
+    pub fn capture(paths: &[PathBuf]) -> std::result::Result<Self, CaptureError> {
+        if paths.is_empty() || paths.len() > MAX_CAPTURE_ROOTS {
+            return Err(CaptureError::Rejected(CaptureRejection::TooManyItems));
+        }
+        let normalized_roots: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                path.to_str()
+                    .map(|path| path.replace('/', "\\").to_lowercase())
+                    .ok_or(CaptureError::Rejected(CaptureRejection::NonUnicodeName))
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        for (index, root) in normalized_roots.iter().enumerate() {
+            let descendant_prefix = format!("{}\\", root.trim_end_matches('\\'));
+            if normalized_roots
+                .iter()
+                .enumerate()
+                .any(|(other, candidate)| {
+                    other != index
+                        && (candidate == root || candidate.starts_with(&descendant_prefix))
+                })
+            {
+                return Err(CaptureError::Rejected(CaptureRejection::InvalidPath));
+            }
+        }
+        let mut entries = Vec::new();
+        let mut total_path_units = 0_usize;
+        let mut active_directories = HashSet::new();
+        for path in paths {
+            if !path.is_absolute() {
+                return Err(CaptureError::Rejected(CaptureRejection::InvalidPath));
+            }
+            let root_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(CaptureError::Rejected(CaptureRejection::NonUnicodeName))?;
+            validate_virtual_file_name(root_name).map_err(CaptureError::Windows)?;
+            capture_tree_entry(
+                path,
+                root_name,
+                0,
+                &mut entries,
+                &mut total_path_units,
+                &mut active_directories,
+            )?;
+        }
+        let descriptors: Vec<VirtualFileDescriptor> =
+            entries.iter().map(FileSnapshot::descriptor).collect();
+        validate_virtual_descriptor_tree(&descriptors).map_err(CaptureError::Windows)?;
+        entries
+            .iter()
+            .filter(|entry| !entry.is_directory())
+            .try_fold(0_u64, |total, entry| total.checked_add(entry.size))
+            .ok_or(CaptureError::Rejected(CaptureRejection::ManifestTooLarge))?;
+        Ok(Self {
+            entries: Arc::from(entries),
+        })
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn entries(&self) -> &[FileSnapshot] {
+        &self.entries
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn file_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.is_directory())
+            .count()
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn directory_count(&self) -> usize {
+        self.entries.len() - self.file_count()
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn total_size(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.is_directory())
+            .map(|entry| entry.size)
+            .sum()
+    }
+}
+
+fn capture_tree_entry(
+    path: &Path,
+    virtual_path: &str,
+    depth: usize,
+    entries: &mut Vec<FileSnapshot>,
+    total_path_units: &mut usize,
+    active_directories: &mut HashSet<FileIdentity>,
+) -> std::result::Result<(), CaptureError> {
+    if depth >= MAX_VIRTUAL_DEPTH {
+        return Err(CaptureError::Rejected(CaptureRejection::TreeTooDeep));
+    }
+    let snapshot = FileSnapshot::capture_at(path, Arc::from(virtual_path), true)?;
+    *total_path_units = total_path_units
+        .checked_add(virtual_path.encode_utf16().count())
+        .ok_or(CaptureError::Rejected(CaptureRejection::ManifestTooLarge))?;
+    if entries.len() >= MAX_VIRTUAL_ITEMS || *total_path_units > MAX_TOTAL_VIRTUAL_PATH_U16 {
+        return Err(CaptureError::Rejected(CaptureRejection::ManifestTooLarge));
+    }
+    let is_directory = snapshot.is_directory();
+    let identity = snapshot.identity;
+    entries.push(snapshot);
+    if !is_directory {
+        return Ok(());
+    }
+    if !active_directories.insert(identity) {
+        // A junction or symbolic link points back into the active recursion chain. Preserve the
+        // directory entry as an empty boundary and stop walking, matching the content-first policy
+        // without allowing an infinite tree.
+        return Ok(());
+    }
+
+    let read_directory =
+        std::fs::read_dir(path).map_err(|error| CaptureError::Windows(io_error(&error)))?;
+    let mut children = Vec::new();
+    for child in read_directory {
+        let child = child.map_err(|error| CaptureError::Windows(io_error(&error)))?;
+        let name = child
+            .file_name()
+            .into_string()
+            .map_err(|_| CaptureError::Rejected(CaptureRejection::NonUnicodeName))?;
+        validate_virtual_file_name(&name).map_err(CaptureError::Windows)?;
+        children.push((name, child.path()));
+    }
+    children.sort_by(|left, right| {
+        left.0
+            .to_lowercase()
+            .cmp(&right.0.to_lowercase())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    for (name, child_path) in children {
+        let child_virtual_path = format!("{virtual_path}\\{name}");
+        capture_tree_entry(
+            &child_path,
+            &child_virtual_path,
+            depth + 1,
+            entries,
+            total_path_units,
+            active_directories,
+        )?;
+    }
+    active_directories.remove(&identity);
+    Ok(())
+}
+
+fn reject_attributes(attributes: u32) -> std::result::Result<(), CaptureRejection> {
+    reject_attributes_for_capture(attributes, false)
+}
+
+fn reject_attributes_for_capture(
+    attributes: u32,
+    allow_directory: bool,
+) -> std::result::Result<(), CaptureRejection> {
+    if !allow_directory && attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+        return Err(CaptureRejection::Directory);
+    }
+    Ok(())
+}
+
+fn open_snapshot_handle(path: &Path) -> Result<File> {
+    open_file_with_flags(
+        path,
+        FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0,
+        FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_NO_RECALL.0,
+    )
+}
+
+fn open_stable_handle(path: &Path) -> Result<File> {
+    open_file_with_flags(path, FILE_SHARE_READ.0, FILE_FLAG_BACKUP_SEMANTICS.0)
+}
+
+fn open_file_with_flags(path: &Path, share_mode: u32, flags: u32) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(share_mode)
+        .custom_flags(flags);
+    options.open(path).map_err(|error| io_error(&error))
+}
+
+fn file_handle(file: &File) -> HANDLE {
+    HANDLE(file.as_raw_handle())
+}
+
+fn information_for(file: &File) -> Result<BY_HANDLE_FILE_INFORMATION> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(file_handle(file), &raw mut information) }?;
+    Ok(information)
+}
+
+fn file_size(information: &BY_HANDLE_FILE_INFORMATION) -> u64 {
+    (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow)
+}
+
+fn file_identity(information: &BY_HANDLE_FILE_INFORMATION) -> FileIdentity {
+    FileIdentity {
+        volume_serial: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    }
+}
+
+fn transferable_attributes(attributes: u32) -> u32 {
+    let basic = attributes
+        & (FILE_ATTRIBUTE_ARCHIVE.0
+            | FILE_ATTRIBUTE_HIDDEN.0
+            | FILE_ATTRIBUTE_READONLY.0
+            | FILE_ATTRIBUTE_SYSTEM.0);
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+        basic | FILE_ATTRIBUTE_DIRECTORY.0
+    } else if basic == 0 {
+        FILE_ATTRIBUTE_NORMAL.0
+    } else {
+        basic
+    }
+}
+
+fn path_wide(path: &Path) -> Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(Error::from_hresult(E_INVALIDARG));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+fn io_error(error: &std::io::Error) -> Error {
+    error.raw_os_error().map_or_else(
+        || Error::from_hresult(E_UNEXPECTED),
+        |code| Error::from_hresult(HRESULT::from_win32(code.cast_unsigned())),
+    )
+}
+
+fn source_changed_error() -> Error {
+    Error::from_hresult(HRESULT::from_win32(ERROR_FILE_INVALID.0))
+}
+
+fn offer_unavailable_error() -> Error {
+    Error::from_hresult(HRESULT::from_win32(ERROR_TIMEOUT.0))
+}
+
+struct StableFileContext {
+    file: File,
+    snapshot: Arc<FileSnapshot>,
+}
+
+impl StableFileContext {
+    fn open(snapshot: Arc<FileSnapshot>) -> Result<Self> {
+        let file = open_stable_handle(&snapshot.path)?;
+        let information = information_for(&file)?;
+        reject_attributes(information.dwFileAttributes).map_err(|_| source_changed_error())?;
+        if unsafe { GetFileType(file_handle(&file)) } != FILE_TYPE_DISK
+            || !snapshot.matches(&information)
+        {
+            return Err(source_changed_error());
+        }
+        Ok(Self { file, snapshot })
+    }
+
+    fn verify(&self) -> Result<()> {
+        let information = information_for(&self.file)?;
+        if self.snapshot.matches(&information) {
+            Ok(())
+        } else {
+            Err(source_changed_error())
+        }
+    }
+}
+
+enum StableFileState {
+    Unstarted,
+    Active(Arc<StableFileContext>),
+    Failed(HRESULT),
+}
+
+pub struct StableFileSource {
+    snapshot: Arc<FileSnapshot>,
+    expires_at: Option<Instant>,
+    revoked: AtomicBool,
+    state: Mutex<StableFileState>,
+    read_calls: AtomicU64,
+    bytes_read: AtomicU64,
+}
+
+impl StableFileSource {
+    fn new(snapshot: Arc<FileSnapshot>, expires_at: Instant) -> Self {
+        Self {
+            snapshot,
+            expires_at: Some(expires_at),
+            revoked: AtomicBool::new(false),
+            state: Mutex::new(StableFileState::Unstarted),
+            read_calls: AtomicU64::new(0),
+            bytes_read: AtomicU64::new(0),
+        }
+    }
+
+    /// The authenticated secure offer owns this independent deferred source until its
+    /// task is cancelled, idle or complete. Clipboard replacement/metadata expiry must
+    /// not revoke later files of an already accepted directory transfer.
+    pub(crate) fn transfer_source(&self) -> Arc<Self> {
+        let mut owned = Self::new(Arc::clone(&self.snapshot), Instant::now());
+        owned.expires_at = None;
+        Arc::new(owned)
+    }
+
+    fn context(&self) -> Result<Arc<StableFileContext>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::from_hresult(E_UNEXPECTED))?;
+        match &*state {
+            StableFileState::Active(context) => return Ok(Arc::clone(context)),
+            StableFileState::Failed(code) => return Err(Error::from_hresult(*code)),
+            StableFileState::Unstarted => {}
+        }
+        if self.revoked.load(Ordering::Acquire)
+            || self
+                .expires_at
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            let error = offer_unavailable_error();
+            *state = StableFileState::Failed(error.code());
+            return Err(error);
+        }
+        match StableFileContext::open(Arc::clone(&self.snapshot)) {
+            Ok(context) => {
+                let context = Arc::new(context);
+                *state = StableFileState::Active(Arc::clone(&context));
+                Ok(context)
+            }
+            Err(error) => {
+                *state = StableFileState::Failed(error.code());
+                Err(error)
+            }
+        }
+    }
+
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+
+    fn release_context(&self, context: &Arc<StableFileContext>) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::from_hresult(E_UNEXPECTED))?;
+        if matches!(&*state, StableFileState::Active(active) if Arc::ptr_eq(active, context)) {
+            *state = StableFileState::Unstarted;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn read_calls(&self) -> u64 {
+        self.read_calls.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+}
+
+impl ReadAtSource for StableFileSource {
+    fn len(&self) -> u64 {
+        self.snapshot.size
+    }
+
+    fn read_at(&self, offset: u64, destination: &mut [u8]) -> Result<usize> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        let context = self.context()?;
+        context.verify()?;
+        if offset >= self.snapshot.size {
+            self.release_context(&context)?;
+            return Ok(0);
+        }
+        let available = self.snapshot.size - offset;
+        let length = destination
+            .len()
+            .min(usize::try_from(available).unwrap_or(usize::MAX));
+        let read = context
+            .file
+            .seek_read(&mut destination[..length], offset)
+            .map_err(|error| io_error(&error))?;
+        let total_read = self
+            .bytes_read
+            .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed)
+            .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        if read != length {
+            return Err(source_changed_error());
+        }
+        if offset.saturating_add(read as u64) >= self.snapshot.size {
+            context.verify()?;
+            // The offer metadata remains reusable, but the stable Windows handle must not keep a
+            // successfully transferred source file locked until the whole offer expires. A later
+            // repeat read reopens and revalidates the same snapshot before serving any bytes.
+            if total_read >= self.snapshot.size {
+                self.release_context(&context)?;
+            }
+        }
+        Ok(read)
+    }
+}
+
+pub struct LocalOfferEntry {
+    snapshot: Arc<FileSnapshot>,
+    source: Option<Arc<StableFileSource>>,
+}
+
+impl LocalOfferEntry {
+    #[must_use]
+    pub fn descriptor(&self) -> VirtualFileDescriptor {
+        self.snapshot.descriptor()
+    }
+
+    #[must_use]
+    pub fn source(&self) -> Option<Arc<StableFileSource>> {
+        self.source.clone()
+    }
+
+    #[must_use]
+    pub(crate) fn source_path(&self) -> &Path {
+        &self.snapshot.path
+    }
+}
+
+pub struct LocalFileOffer {
+    offer_id: GUID,
+    created_at: Instant,
+    expires_at: Instant,
+    entries: Arc<[LocalOfferEntry]>,
+    origin_payload: Arc<[u8]>,
+}
+
+impl LocalFileOffer {
+    #[cfg(test)]
+    fn create(snapshot: FileSnapshot, ttl: Duration) -> Result<Self> {
+        Self::create_tree(
+            &FileTreeSnapshot {
+                entries: Arc::from(vec![snapshot]),
+            },
+            ttl,
+        )
+    }
+
+    fn create_tree(tree: &FileTreeSnapshot, ttl: Duration) -> Result<Self> {
+        if ttl.is_zero() {
+            return Err(Error::from_hresult(E_INVALIDARG));
+        }
+        let offer_id = unsafe { CoCreateGuid() }?;
+        let created_at = Instant::now();
+        let expires_at = created_at
+            .checked_add(ttl)
+            .ok_or_else(|| Error::from_hresult(E_INVALIDARG))?;
+        let mut entries = Vec::with_capacity(tree.entries.len());
+        for snapshot in tree.entries.iter().cloned() {
+            let snapshot = Arc::new(snapshot);
+            let source = (!snapshot.is_directory())
+                .then(|| Arc::new(StableFileSource::new(Arc::clone(&snapshot), expires_at)));
+            entries.push(LocalOfferEntry { snapshot, source });
+        }
+        let mut origin_payload = Vec::with_capacity(PRIVATE_ORIGIN_PREFIX.len() + 16);
+        origin_payload.extend_from_slice(PRIVATE_ORIGIN_PREFIX);
+        origin_payload.extend_from_slice(&offer_id.to_u128().to_be_bytes());
+        Ok(Self {
+            offer_id,
+            created_at,
+            expires_at,
+            entries: Arc::from(entries),
+            origin_payload: Arc::from(origin_payload),
+        })
+    }
+
+    #[must_use]
+    pub fn offer_id(&self) -> GUID {
+        self.offer_id
+    }
+
+    #[must_use]
+    pub fn age(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    #[must_use]
+    pub fn remaining_ttl(&self) -> Duration {
+        self.expires_at.saturating_duration_since(Instant::now())
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn source(&self) -> Arc<StableFileSource> {
+        self.entries[0]
+            .source
+            .clone()
+            .expect("single-file offer has a source")
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[LocalOfferEntry] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn file_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.source.is_some())
+            .count()
+    }
+
+    #[must_use]
+    pub fn directory_count(&self) -> usize {
+        self.entries.len() - self.file_count()
+    }
+
+    #[must_use]
+    pub fn total_size(&self) -> u64 {
+        self.entries.iter().map(|entry| entry.snapshot.size).sum()
+    }
+
+    #[must_use]
+    pub fn read_calls(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.source.as_ref())
+            .map(|source| source.read_calls())
+            .sum()
+    }
+
+    #[must_use]
+    pub fn bytes_read(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.source.as_ref())
+            .map(|source| source.bytes_read())
+            .sum()
+    }
+
+    #[must_use]
+    pub fn origin_payload(&self) -> Arc<[u8]> {
+        Arc::clone(&self.origin_payload)
+    }
+
+    fn revoke(&self) {
+        for source in self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.source.as_ref())
+        {
+            source.revoke();
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct LocalOfferRegistry {
+    current: Option<Arc<LocalFileOffer>>,
+}
+
+impl LocalOfferRegistry {
+    #[cfg(test)]
+    pub fn publish(
+        &mut self,
+        snapshot: FileSnapshot,
+        ttl: Duration,
+    ) -> Result<Arc<LocalFileOffer>> {
+        let offer = Arc::new(LocalFileOffer::create(snapshot, ttl)?);
+        if let Some(previous) = self.current.replace(Arc::clone(&offer)) {
+            previous.revoke();
+        }
+        Ok(offer)
+    }
+
+    pub fn publish_tree(
+        &mut self,
+        snapshot: &FileTreeSnapshot,
+        ttl: Duration,
+    ) -> Result<Arc<LocalFileOffer>> {
+        let offer = Arc::new(LocalFileOffer::create_tree(snapshot, ttl)?);
+        if let Some(previous) = self.current.replace(Arc::clone(&offer)) {
+            previous.revoke();
+        }
+        Ok(offer)
+    }
+
+    pub fn revoke_current(&mut self) {
+        if let Some(current) = self.current.take() {
+            current.revoke();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    use windows::Win32::Foundation::{ERROR_FILE_INVALID, ERROR_TIMEOUT};
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_COMPRESSED,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_INTEGRITY_STREAM,
+        FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
+    };
+    use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE};
+    use windows::core::HRESULT;
+
+    use super::{
+        CaptureError, CaptureRejection, FileSnapshot, FileTreeSnapshot, LocalOfferRegistry,
+        PRIVATE_ORIGIN_PREFIX, StableFileSource, is_private_origin_payload, reject_attributes,
+        transferable_attributes, validate_drop_effect,
+    };
+    use crate::clipboard::source::ReadAtSource;
+
+    struct TestFile {
+        directory: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl TestFile {
+        fn create(name: &str, bytes: &[u8]) -> Self {
+            let directory = std::env::temp_dir().join(format!(
+                "pierdesk-local-file-{}-{}",
+                std::process::id(),
+                unsafe { windows::Win32::System::Com::CoCreateGuid() }
+                    .unwrap()
+                    .to_u128()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let path = directory.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            Self { directory, path }
+        }
+    }
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn secure_task_lease_keeps_deferred_files_beyond_clipboard_expiry_and_replacement() {
+        let file = TestFile::create("deferred.bin", b"deferred payload");
+        let source = StableFileSource::new(
+            Arc::new(FileSnapshot::capture(&file.path).unwrap()),
+            std::time::Instant::now(),
+        );
+        let leased = source.transfer_source();
+        source.revoke();
+        let mut bytes = [0; 16];
+        assert!(source.read_at(0, &mut bytes).is_err());
+        assert_eq!(leased.read_at(0, &mut bytes).unwrap(), bytes.len());
+        assert_eq!(&bytes, b"deferred payload");
+        // The completed handle is released; reopening remains valid within the task lease.
+        assert_eq!(leased.read_at(0, &mut bytes).unwrap(), bytes.len());
+        std::fs::write(&file.path, b"changed content with a different size").unwrap();
+        assert!(leased.read_at(0, &mut bytes).is_err());
+    }
+
+    #[test]
+    fn content_first_attribute_policy_only_rejects_a_direct_file_directory_mismatch() {
+        assert_eq!(
+            reject_attributes(FILE_ATTRIBUTE_DIRECTORY.0),
+            Err(CaptureRejection::Directory)
+        );
+        for attributes in [
+            FILE_ATTRIBUTE_REPARSE_POINT.0,
+            FILE_ATTRIBUTE_ENCRYPTED.0,
+            FILE_ATTRIBUTE_SPARSE_FILE.0,
+            FILE_ATTRIBUTE_OFFLINE.0,
+            FILE_ATTRIBUTE_COMPRESSED.0,
+            FILE_ATTRIBUTE_INTEGRITY_STREAM.0,
+        ] {
+            assert_eq!(reject_attributes(attributes), Ok(()));
+        }
+        assert_eq!(reject_attributes(0), Ok(()));
+        assert_eq!(
+            transferable_attributes(
+                FILE_ATTRIBUTE_ARCHIVE.0
+                    | FILE_ATTRIBUTE_REPARSE_POINT.0
+                    | FILE_ATTRIBUTE_ENCRYPTED.0
+                    | FILE_ATTRIBUTE_SPARSE_FILE.0
+                    | FILE_ATTRIBUTE_OFFLINE.0
+                    | FILE_ATTRIBUTE_COMPRESSED.0
+                    | FILE_ATTRIBUTE_INTEGRITY_STREAM.0
+            ),
+            FILE_ATTRIBUTE_ARCHIVE.0
+        );
+    }
+
+    #[test]
+    fn directory_snapshot_discards_nonzero_ntfs_directory_stream_size() {
+        let information = BY_HANDLE_FILE_INFORMATION {
+            dwFileAttributes: FILE_ATTRIBUTE_DIRECTORY.0,
+            nFileSizeHigh: 1,
+            nFileSizeLow: 12_288,
+            ..BY_HANDLE_FILE_INFORMATION::default()
+        };
+
+        let snapshot = FileSnapshot::from_information(
+            std::path::PathBuf::from(r"G:\directory"),
+            Arc::from("directory"),
+            information,
+        );
+
+        assert!(snapshot.is_directory());
+        assert_eq!(snapshot.size(), 0);
+        assert_eq!(snapshot.descriptor().size, 0);
+    }
+
+    #[test]
+    fn symbolic_file_link_is_flattened_to_its_main_content() {
+        let owner = TestFile::create("target.bin", b"linked payload");
+        let link = owner.directory.join("link.bin");
+        if let Err(error) = std::os::windows::fs::symlink_file(&owner.path, &link) {
+            eprintln!("symbolic-link test unavailable: {error}");
+            return;
+        }
+
+        let snapshot = FileSnapshot::capture(&link).unwrap();
+        assert_eq!(snapshot.file_name().as_ref(), "link.bin");
+        assert_eq!(snapshot.size(), 14);
+        let source = StableFileSource::new(
+            Arc::new(snapshot),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        let mut bytes = [0_u8; 14];
+        assert_eq!(source.read_at(0, &mut bytes).unwrap(), bytes.len());
+        assert_eq!(&bytes, b"linked payload");
+    }
+
+    #[test]
+    fn symbolic_directory_cycle_is_kept_as_an_empty_boundary() {
+        let owner = TestFile::create("anchor.tmp", b"");
+        let root = owner.directory.join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload.bin"), b"payload").unwrap();
+        let loop_link = root.join("loop");
+        if let Err(error) = std::os::windows::fs::symlink_dir(&root, &loop_link) {
+            eprintln!("symbolic-link test unavailable: {error}");
+            return;
+        }
+
+        let tree = FileTreeSnapshot::capture(std::slice::from_ref(&root)).unwrap();
+        let names: Vec<&str> = tree
+            .entries()
+            .iter()
+            .map(|entry| entry.file_name.as_ref())
+            .collect();
+        assert_eq!(tree.directory_count(), 2);
+        assert_eq!(tree.file_count(), 1);
+        assert!(names.contains(&"root\\loop"));
+        assert!(!names.iter().any(|name| name.contains("loop\\loop")));
+
+        std::fs::remove_dir(&loop_link).unwrap();
+    }
+
+    #[test]
+    fn tree_capture_collects_unicode_empty_directories_and_multiple_roots_without_content_reads() {
+        let owner = TestFile::create("anchor.tmp", b"");
+        let root = owner.directory.join("资料-🚢");
+        let empty = root.join("空目录");
+        let nested = root.join("子目录");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.join("alpha.txt"), b"ab").unwrap();
+        std::fs::write(nested.join("β.bin"), b"xyz").unwrap();
+        let standalone = owner.directory.join("单独.txt");
+        std::fs::write(&standalone, b"!").unwrap();
+
+        let tree = FileTreeSnapshot::capture(&[root.clone(), standalone]).unwrap();
+        assert_eq!(tree.directory_count(), 3);
+        assert_eq!(tree.file_count(), 3);
+        assert_eq!(tree.total_size(), 6);
+        let names: Vec<&str> = tree
+            .entries()
+            .iter()
+            .map(|entry| entry.file_name.as_ref())
+            .collect();
+        assert_eq!(names[0], "资料-🚢");
+        assert!(names.contains(&"资料-🚢\\空目录"));
+        assert!(names.contains(&"资料-🚢\\子目录\\β.bin"));
+        assert!(names.contains(&"单独.txt"));
+
+        let mut registry = LocalOfferRegistry::default();
+        let offer = registry
+            .publish_tree(&tree, Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(offer.entries().len(), 6);
+        assert_eq!(offer.file_count(), 3);
+        assert_eq!(offer.directory_count(), 3);
+        assert_eq!(offer.total_size(), 6);
+        assert_eq!(offer.read_calls(), 0);
+        assert_eq!(offer.bytes_read(), 0);
+        assert!(
+            offer
+                .entries()
+                .iter()
+                .filter(|entry| entry.descriptor().is_directory())
+                .all(|entry| entry.source().is_none())
+        );
+        assert!(
+            offer
+                .entries()
+                .iter()
+                .filter(|entry| !entry.descriptor().is_directory())
+                .all(|entry| entry.source().is_some())
+        );
+    }
+
+    #[test]
+    fn overlapping_selected_roots_are_rejected_as_a_case_insensitive_tree_collision() {
+        let owner = TestFile::create("anchor.tmp", b"");
+        let root = owner.directory.join("root");
+        std::fs::create_dir(&root).unwrap();
+        let child = root.join("child.txt");
+        std::fs::write(&child, b"x").unwrap();
+        assert!(FileTreeSnapshot::capture(&[root, child]).is_err());
+    }
+
+    #[test]
+    fn only_an_explicit_copy_effect_is_accepted() {
+        assert_eq!(validate_drop_effect(DROPEFFECT_COPY.0), Ok(()));
+        assert_eq!(
+            validate_drop_effect(DROPEFFECT_MOVE.0),
+            Err(CaptureRejection::CutOperation)
+        );
+        assert_eq!(
+            validate_drop_effect(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0),
+            Err(CaptureRejection::CutOperation)
+        );
+        assert_eq!(
+            validate_drop_effect(0),
+            Err(CaptureRejection::MissingCopyEffect)
+        );
+    }
+
+    #[test]
+    fn clipboard_rejections_have_actionable_chinese_messages() {
+        let message = CaptureRejection::MissingCopyEffect.user_message();
+        assert!(message.contains("复制"));
+        assert!(message.contains("Ctrl+C"));
+        assert!(!message.contains("missing-copy-effect"));
+    }
+
+    #[test]
+    fn capture_reads_metadata_but_no_content() {
+        let file = TestFile::create("metadata.bin", b"abcdef");
+        let snapshot = FileSnapshot::capture(&file.path).unwrap();
+        let source = StableFileSource::new(
+            Arc::new(snapshot.clone()),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+
+        assert_eq!(snapshot.size(), 6);
+        assert_eq!(snapshot.file_name().as_ref(), "metadata.bin");
+        assert_eq!(snapshot.descriptor().attributes, snapshot.attributes);
+        assert_eq!(source.read_calls(), 0);
+        assert_eq!(source.bytes_read(), 0);
+    }
+
+    #[test]
+    fn private_origin_requires_the_exact_versioned_payload_shape() {
+        let mut payload = PRIVATE_ORIGIN_PREFIX.to_vec();
+        payload.extend_from_slice(&[0xA5; 16]);
+        assert!(is_private_origin_payload(&payload));
+        assert!(!is_private_origin_payload(PRIVATE_ORIGIN_PREFIX));
+        payload[0] ^= 1;
+        assert!(!is_private_origin_payload(&payload));
+    }
+
+    #[test]
+    fn directory_capture_reports_the_explicit_policy_rejection() {
+        let file = TestFile::create("inside.bin", b"payload");
+        assert!(matches!(
+            FileSnapshot::capture(&file.directory),
+            Err(CaptureError::Rejected(CaptureRejection::Directory))
+        ));
+    }
+
+    #[test]
+    fn alternate_data_stream_is_ignored_while_the_main_stream_is_captured() {
+        let file = TestFile::create("motw.bin", b"payload");
+        let stream_path =
+            std::path::PathBuf::from(format!("{}:Zone.Identifier", file.path.display()));
+        match std::fs::write(&stream_path, b"[ZoneTransfer]\r\nZoneId=3\r\n") {
+            Ok(()) => {
+                let snapshot = FileSnapshot::capture(&file.path).unwrap();
+                assert_eq!(snapshot.size(), 7);
+            }
+            Err(error) => eprintln!("ADS test not supported on this volume: {error}"),
+        }
+    }
+
+    #[test]
+    fn alternate_data_stream_added_after_capture_does_not_block_main_content() {
+        let file = TestFile::create("late-motw.bin", b"payload");
+        let snapshot = FileSnapshot::capture(&file.path).unwrap();
+        let stream_path =
+            std::path::PathBuf::from(format!("{}:Zone.Identifier", file.path.display()));
+        if std::fs::write(&stream_path, b"[ZoneTransfer]\r\nZoneId=3\r\n").is_err() {
+            return;
+        }
+        let source = StableFileSource::new(
+            Arc::new(snapshot),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        let mut bytes = [0_u8; 8];
+
+        assert_eq!(source.read_at(0, &mut bytes).unwrap(), 7);
+        assert_eq!(&bytes[..7], b"payload");
+        assert_eq!(source.read_calls(), 1);
+        assert_eq!(source.bytes_read(), 7);
+    }
+
+    #[test]
+    fn source_change_before_first_read_fails_terminally() {
+        let file = TestFile::create("changed.bin", b"before");
+        let snapshot = FileSnapshot::capture(&file.path).unwrap();
+        std::fs::write(&file.path, b"after-longer").unwrap();
+        let source = StableFileSource::new(
+            Arc::new(snapshot),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        let mut bytes = [0_u8; 16];
+
+        let error = source.read_at(0, &mut bytes).unwrap_err();
+        assert_eq!(error.code(), HRESULT::from_win32(ERROR_FILE_INVALID.0));
+        let second = source.read_at(0, &mut bytes).unwrap_err();
+        assert_eq!(second.code(), HRESULT::from_win32(ERROR_FILE_INVALID.0));
+        assert_eq!(source.read_calls(), 2);
+        assert_eq!(source.bytes_read(), 0);
+    }
+
+    #[test]
+    fn stable_handle_uses_explicit_offsets_and_blocks_write_rename_and_delete() {
+        let file = TestFile::create("stable.bin", b"0123456789abcdef");
+        let snapshot = FileSnapshot::capture(&file.path).unwrap();
+        let source = Arc::new(StableFileSource::new(
+            Arc::new(snapshot),
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        ));
+        let barrier = Arc::new(Barrier::new(3));
+        let read = |offset| {
+            let source = Arc::clone(&source);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut bytes = [0_u8; 4];
+                barrier.wait();
+                source.read_at(offset, &mut bytes).unwrap();
+                bytes
+            })
+        };
+        let first = read(0);
+        let second = read(8);
+        barrier.wait();
+
+        assert_eq!(&first.join().unwrap(), b"0123");
+        assert_eq!(&second.join().unwrap(), b"89ab");
+        assert!(OpenOptions::new().write(true).open(&file.path).is_err());
+        assert!(std::fs::rename(&file.path, file.directory.join("renamed.bin")).is_err());
+        assert!(std::fs::remove_file(&file.path).is_err());
+        assert_eq!(source.read_calls(), 2);
+        assert_eq!(source.bytes_read(), 8);
+    }
+
+    #[test]
+    fn completed_read_releases_the_stable_handle_for_rename_and_delete() {
+        let file = TestFile::create("released.bin", b"finished");
+        let snapshot = FileSnapshot::capture(&file.path).unwrap();
+        let source = StableFileSource::new(
+            Arc::new(snapshot),
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        );
+        let mut bytes = [0_u8; 8];
+
+        assert_eq!(source.read_at(0, &mut bytes).unwrap(), bytes.len());
+        let renamed = file.directory.join("renamed.bin");
+        std::fs::rename(&file.path, &renamed).unwrap();
+        std::fs::remove_file(renamed).unwrap();
+    }
+
+    #[test]
+    fn expired_and_replaced_unstarted_offers_cannot_begin() {
+        let first = TestFile::create("first.bin", b"first");
+        let second = TestFile::create("second.bin", b"second");
+        let mut registry = LocalOfferRegistry::default();
+        let expired = registry
+            .publish(
+                FileSnapshot::capture(&first.path).unwrap(),
+                std::time::Duration::from_millis(1),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut bytes = [0_u8; 8];
+        assert_eq!(
+            expired.source().read_at(0, &mut bytes).unwrap_err().code(),
+            HRESULT::from_win32(ERROR_TIMEOUT.0)
+        );
+
+        let old = registry
+            .publish(
+                FileSnapshot::capture(&first.path).unwrap(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        let current = registry
+            .publish(
+                FileSnapshot::capture(&second.path).unwrap(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            old.source().read_at(0, &mut bytes).unwrap_err().code(),
+            HRESULT::from_win32(ERROR_TIMEOUT.0)
+        );
+        assert_eq!(current.source().read_at(0, &mut bytes).unwrap(), 6);
+        assert_eq!(&bytes[..6], b"second");
+    }
+
+    #[test]
+    fn an_active_offer_can_finish_after_registry_replacement() {
+        let first = TestFile::create("active.bin", b"active-content");
+        let second = TestFile::create("replacement.bin", b"replacement");
+        let mut registry = LocalOfferRegistry::default();
+        let active = registry
+            .publish(
+                FileSnapshot::capture(&first.path).unwrap(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        let source = active.source();
+        let mut prefix = [0_u8; 6];
+        assert_eq!(source.read_at(0, &mut prefix).unwrap(), 6);
+        registry
+            .publish(
+                FileSnapshot::capture(&second.path).unwrap(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        let mut suffix = [0_u8; 8];
+        assert_eq!(source.read_at(6, &mut suffix).unwrap(), 8);
+        assert_eq!(&prefix, b"active");
+        assert_eq!(&suffix, b"-content");
+    }
+
+    #[test]
+    fn open_writer_from_before_transfer_prevents_a_mixed_snapshot() {
+        let file = TestFile::create("writer.bin", b"stable");
+        let snapshot = FileSnapshot::capture(&file.path).unwrap();
+        let mut writer = OpenOptions::new().write(true).open(&file.path).unwrap();
+        let source = StableFileSource::new(
+            Arc::new(snapshot),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        );
+        writer.write_all(b"changed").unwrap();
+        let mut bytes = [0_u8; 8];
+
+        assert!(source.read_at(0, &mut bytes).is_err());
+    }
+}

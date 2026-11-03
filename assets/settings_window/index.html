@@ -1,0 +1,1811 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pierdesk 设置</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f5f7fa;
+      --surface: #fff;
+      --surface-raised: #fbfcfe;
+      --border: #e2e7ef;
+      --border-strong: #d2d9e4;
+      --text: #172033;
+      --muted: #697386;
+      --subtle: #8993a4;
+      --blue: #1769e8;
+      --blue-hover: #0d5fdc;
+      --blue-soft: #eaf2ff;
+      --green: #16845b;
+      --green-soft: #e8f7f0;
+      --amber: #a76005;
+      --amber-soft: #fff3dc;
+      --red: #cf3f4e;
+      --red-soft: #fff0f1;
+      --shadow: 0 8px 24px rgba(22, 40, 72, .055);
+      --radius: 12px;
+      --topbar: 72px;
+      --sidebar: 288px;
+      --font-scale: 1;
+      --topbar-bg: rgba(255, 255, 255, .97);
+      --sidebar-bg: rgba(255, 255, 255, .62);
+      --control-hover: #eef1f5;
+      --nav-text: #303a4c;
+      --nav-hover: #eef3fa;
+      --chip-bg: #eef1f5;
+      --button-hover: #f7f9fc;
+      --slot-bg: #fbfdff;
+      --slot-border: #b9c9df;
+      --peer-bg: #e9f8f3;
+      --peer-border: #32a987;
+      --peer-text: #126b58;
+      --track: #e5e9ef;
+      --story-text: #354052;
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      font-size: 16px;
+      background: var(--canvas);
+      color: var(--text);
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --canvas: #10141c;
+      --surface: #191f2a;
+      --surface-raised: #202733;
+      --border: #2d3645;
+      --border-strong: #3a4658;
+      --text: #edf2fa;
+      --muted: #aab4c5;
+      --subtle: #7f8ba0;
+      --blue: #68a4ff;
+      --blue-hover: #5598fb;
+      --blue-soft: #172c49;
+      --green: #58d5ad;
+      --green-soft: #17362f;
+      --amber: #f1b65d;
+      --amber-soft: #3d2c16;
+      --red: #ff8792;
+      --red-soft: #422229;
+      --shadow: 0 10px 28px rgba(0, 0, 0, .22);
+      --topbar-bg: rgba(20, 25, 34, .97);
+      --sidebar-bg: rgba(22, 28, 38, .82);
+      --control-hover: #28313f;
+      --nav-text: #cdd5e2;
+      --nav-hover: #232c3a;
+      --chip-bg: #293240;
+      --button-hover: #242d3a;
+      --slot-bg: #171d27;
+      --slot-border: #43546d;
+      --peer-bg: #17352f;
+      --peer-border: #51c9a6;
+      --peer-text: #8ce4c9;
+      --track: #313a48;
+      --story-text: #d6deea;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--canvas); }
+    body { font-size: calc(16px * var(--font-scale)); }
+    button, input, select { font: inherit; }
+    button, select, input[type="range"] { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+      outline: 3px solid rgba(23, 105, 232, .22);
+      outline-offset: 2px;
+    }
+
+    .app { height: 100vh; min-height: 100vh; display: grid; grid-template: var(--topbar) minmax(0, 1fr) / var(--sidebar) minmax(0, 1fr); }
+    .topbar {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 22px 0 26px;
+      border-bottom: 1px solid var(--border);
+      background: var(--topbar-bg);
+      user-select: none;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brand img { width: 34px; height: 34px; padding: 4px; border-radius: 7px; object-fit: contain; background: #0b69c8; }
+    .brand strong { font-size: calc(21px * var(--font-scale)); font-weight: 680; letter-spacing: -.02em; }
+    .top-actions { display: flex; align-items: center; gap: 14px; }
+    .appearance-toggle {
+      height: 38px;
+      padding: 0 13px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      background: var(--surface-raised);
+    }
+    .appearance-toggle:hover { color: var(--text); background: var(--button-hover); }
+    .connection-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      height: 38px;
+      padding: 0 16px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-raised);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .window-controls { display: flex; gap: 4px; }
+    .window-button { width: 42px; height: 38px; border: 0; border-radius: 7px; color: var(--text); background: transparent; }
+    .window-button:hover { background: var(--control-hover); }
+    .window-button.close:hover { color: white; background: #c42b1c; }
+
+    .sidebar {
+      min-width: 0;
+      height: calc(100vh - var(--topbar));
+      min-height: calc(100vh - var(--topbar));
+      align-self: stretch;
+      padding: 26px 12px;
+      overflow: auto;
+      border-right: 1px solid var(--border);
+      background: var(--sidebar-bg);
+    }
+    .nav { display: grid; gap: 6px; }
+    .nav-button {
+      position: relative;
+      width: 100%;
+      min-height: 58px;
+      padding: 0 18px;
+      border: 0;
+      border-radius: 9px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: transparent;
+      color: var(--nav-text);
+      text-align: left;
+    }
+    .nav-button:hover { background: var(--nav-hover); }
+    .nav-button.active { color: var(--blue); background: var(--blue-soft); font-weight: 650; }
+    .nav-button.active::before { content: ""; position: absolute; left: 0; top: 13px; bottom: 13px; width: 3px; border-radius: 3px; background: var(--blue); }
+    .nav-icon { width: 23px; height: 23px; flex: 0 0 auto; }
+
+    .content { min-width: 0; overflow: auto; padding: 30px 36px 44px; }
+    .page { width: 100%; max-width: 1240px; margin: 0 auto; }
+    .page-heading { margin: 0 0 22px; }
+    h1 { margin: 0; font-size: calc(32px * var(--font-scale)); line-height: 1.2; letter-spacing: -.025em; font-weight: 700; }
+    .subtitle { margin: 6px 0 0; color: var(--muted); font-size: calc(15px * var(--font-scale)); }
+    h2 { margin: 0; font-size: calc(20px * var(--font-scale)); line-height: 1.3; font-weight: 680; }
+    h3 { margin: 0; font-size: calc(17px * var(--font-scale)); line-height: 1.35; font-weight: 670; }
+    p { line-height: 1.65; }
+    .section-title { margin: 24px 0 12px; display: flex; align-items: center; gap: 12px; }
+
+    .card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .card-pad { padding: 22px 24px; }
+    .row { display: flex; align-items: center; gap: 14px; }
+    .between { justify-content: space-between; }
+    .stack { display: grid; gap: 12px; }
+    .muted { color: var(--muted); }
+    .subtle { color: var(--subtle); }
+    .small { font-size: calc(13px * var(--font-scale)); }
+    .mono { font-family: "Cascadia Mono", "Consolas", monospace; font-variant-numeric: tabular-nums; }
+    .divider { height: 1px; background: var(--border); }
+    .dot { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--subtle); }
+    .dot.green { background: #22b43a; box-shadow: 0 0 0 4px rgba(34, 180, 58, .08); }
+    .chip { display: inline-flex; align-items: center; min-height: 25px; padding: 2px 9px; border-radius: 6px; color: var(--muted); background: var(--chip-bg); font-size: calc(12px * var(--font-scale)); font-weight: 650; }
+    .chip.green { color: var(--green); background: var(--green-soft); }
+    .chip.blue { color: var(--blue); background: var(--blue-soft); }
+    .chip.amber { color: var(--amber); background: var(--amber-soft); }
+    .chip.red { color: var(--red); background: var(--red-soft); }
+
+    .button { min-height: 38px; padding: 8px 15px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); color: var(--text); display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 620; }
+    .button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--button-hover); }
+    .button.primary { color: white; border-color: var(--blue); background: var(--blue); }
+    .button.primary:hover:not(:disabled) { background: var(--blue-hover); }
+    .button.danger { color: var(--red); border-color: #ef9aa3; }
+    .button.ghost { border-color: transparent; background: transparent; color: var(--blue); }
+    .button:disabled { cursor: default; opacity: .46; }
+    .link-button { padding: 0; border: 0; color: var(--blue); background: transparent; text-align: left; }
+    .link-button:hover { text-decoration: underline; }
+    .icon { width: 20px; height: 20px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+    .icon.large { width: 30px; height: 30px; }
+
+    .switch { position: relative; width: 52px; height: 30px; flex: 0 0 auto; border: 0; border-radius: 999px; padding: 0; background: #aeb4bd; transition: background 130ms ease; }
+    .switch::after { content: ""; position: absolute; width: 24px; height: 24px; left: 3px; top: 3px; border-radius: 50%; background: white; box-shadow: 0 1px 4px rgba(0,0,0,.22); transition: transform 130ms ease; }
+    .switch.on { background: var(--blue); }
+    .switch.on::after { transform: translateX(22px); }
+    .switch:disabled { cursor: default; opacity: .55; }
+    .pair-switch-card { margin: 16px 0 28px; padding: 4px 22px; }
+    .pair-switch-head { display: grid; gap: 4px; padding: 16px 0 10px; }
+    .pair-switch-head h2 { margin: 0; font-size: calc(16px * var(--font-scale)); }
+    .pair-switch-head p { margin: 0; }
+    .pair-switch-row { min-height: 68px; padding: 14px 0; }
+    .pair-switch-row .setting-label { flex: 1; min-width: 0; }
+
+    .input, .select { width: 100%; min-height: 44px; border: 1px solid var(--border-strong); border-radius: 7px; padding: 9px 12px; color: var(--text); background: var(--surface); }
+    .input:focus, .select:focus { border-color: var(--blue); outline: 3px solid rgba(23,105,232,.12); }
+    input[type="range"] { width: 100%; accent-color: var(--blue); }
+
+    .status-hero { overflow: hidden; }
+    .workspace-summary { padding: 24px; display: grid; grid-template-columns: minmax(240px, .72fr) minmax(420px, 1.28fr); gap: 24px; }
+    .local-summary { min-width: 0; padding: 4px 24px 4px 2px; border-right: 1px solid var(--border); display: grid; align-content: center; gap: 18px; }
+    .local-identity { min-width: 0; display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: center; gap: 16px; }
+    .local-monitor { width: 62px; height: 62px; border-radius: 16px; display: grid; place-items: center; color: var(--blue); background: var(--blue-soft); }
+    .local-monitor .icon { width: 34px; height: 34px; }
+    .local-copy { min-width: 0; display: grid; gap: 5px; }
+    .local-copy strong { font-size: calc(18px * var(--font-scale)); }
+    .fingerprint { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: calc(12px * var(--font-scale)); }
+    .workspace-health { padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--surface-raised); }
+    .workspace-health-copy { min-width: 0; display: grid; gap: 4px; }
+    .workspace-health strong { font-size: calc(17px * var(--font-scale)); }
+    .workspace-count { flex: 0 0 auto; color: var(--green); font-size: calc(26px * var(--font-scale)); font-weight: 720; letter-spacing: -.03em; }
+    .workspace-count.failed { color: var(--red); }
+    .peer-overview { min-width: 0; display: grid; align-content: start; gap: 12px; }
+    .peer-overview-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .peer-overview-list { display: grid; gap: 9px; }
+    .peer-overview-row { min-width: 0; min-height: 72px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; display: grid; grid-template-columns: minmax(150px, 1.2fr) minmax(130px, .9fr) auto; align-items: center; gap: 14px; background: var(--surface-raised); }
+    .peer-overview-row.error { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); background: var(--red-soft); }
+    .peer-identity { min-width: 0; display: flex; align-items: center; gap: 12px; }
+    .peer-monitor { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 10px; display: grid; place-items: center; color: var(--blue); background: var(--blue-soft); }
+    .peer-monitor .icon { width: 23px; height: 23px; }
+    .peer-copy, .peer-route { min-width: 0; display: grid; gap: 3px; }
+    .peer-copy strong, .peer-route strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .peer-state { display: grid; justify-items: end; gap: 6px; white-space: nowrap; }
+    .facts { padding: 16px 20px; border-top: 1px solid var(--border); display: grid; grid-template-columns: repeat(3, 1fr); background: var(--surface-raised); }
+    .fact { min-width: 0; padding: 0 18px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); text-align: center; }
+    .fact + .fact { border-left: 1px solid var(--border); }
+    .status-alert { margin-top: 14px; padding: 15px 18px; border: 1px solid color-mix(in srgb, var(--red) 48%, var(--border)); border-radius: var(--radius); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; color: var(--red); background: var(--red-soft); }
+    .status-alert-copy { min-width: 0; display: grid; gap: 3px; }
+    .status-alert-copy span { overflow-wrap: anywhere; }
+    .status-notice { margin-top: 14px; padding: 15px 18px; border: 1px solid color-mix(in srgb, var(--amber) 48%, var(--border)); border-radius: var(--radius); display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; color: var(--amber); background: var(--amber-soft); }
+    .status-notice-copy { min-width: 0; display: grid; gap: 3px; }
+    .status-notice-copy span { overflow-wrap: anywhere; }
+    .telemetry-card { margin-top: 14px; overflow: hidden; }
+    .telemetry-head { padding: 18px 20px 14px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+    .telemetry-title { display: grid; gap: 4px; }
+    .telemetry-title h2 { display: flex; align-items: center; gap: 9px; }
+    .telemetry-live { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-size: calc(12px * var(--font-scale)); font-weight: 680; }
+    .telemetry-live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 12%, transparent); }
+    .telemetry-layout { padding: 0 20px 20px; display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, .8fr); gap: 16px; }
+    .latency-panel, .activity-panel { min-width: 0; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-raised); }
+    .latency-panel { padding: 14px 14px 12px; }
+    .latency-legend { min-height: 42px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+    .latency-legend-item { min-width: 0; display: flex; align-items: center; gap: 8px; font-size: calc(12px * var(--font-scale)); }
+    .latency-swatch { width: 18px; height: 3px; flex: 0 0 auto; border-radius: 999px; background: var(--series-color); box-shadow: 0 0 8px color-mix(in srgb, var(--series-color) 45%, transparent); }
+    .latency-legend-item strong { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .latency-current { color: var(--series-color); font-variant-numeric: tabular-nums; font-weight: 720; }
+    .latency-chart { width: 100%; height: 244px; display: block; overflow: visible; }
+    .chart-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .chart-threshold { stroke: color-mix(in srgb, var(--amber) 38%, var(--border)); stroke-width: 1; stroke-dasharray: 5 6; vector-effect: non-scaling-stroke; }
+    .chart-axis-label { fill: var(--subtle); font-size: 10px; font-family: "Cascadia Mono", "Consolas", monospace; }
+    .chart-line { fill: none; stroke: var(--series-color); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--series-color) 30%, transparent)); }
+    .chart-point { fill: var(--surface-raised); stroke: var(--series-color); stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .latency-empty { height: 244px; display: grid; place-items: center; color: var(--muted); text-align: center; }
+    .latency-stats { margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+    .latency-stat { min-width: 0; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px; display: grid; grid-template-columns: auto 1fr; gap: 5px 9px; background: var(--surface); }
+    .latency-stat .latency-swatch { margin-top: 7px; }
+    .latency-stat-copy { min-width: 0; display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; }
+    .latency-stat-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: calc(12px * var(--font-scale)); }
+    .latency-stat-copy span { color: var(--muted); font-size: calc(11px * var(--font-scale)); font-variant-numeric: tabular-nums; }
+    .activity-panel { padding: 14px; display: grid; align-content: start; gap: 10px; }
+    .activity-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .activity-lane { padding: 12px; border: 1px solid var(--border); border-radius: 9px; display: grid; gap: 9px; background: var(--surface); }
+    .activity-lane-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; }
+    .activity-icon { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; color: var(--lane-color); background: color-mix(in srgb, var(--lane-color) 12%, transparent); }
+    .activity-icon .icon { width: 18px; height: 18px; }
+    .activity-copy { min-width: 0; display: grid; gap: 2px; }
+    .activity-copy strong, .activity-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .activity-count { color: var(--lane-color); font-size: calc(18px * var(--font-scale)); font-weight: 730; font-variant-numeric: tabular-nums; }
+    .activity-track { position: relative; height: 18px; border-radius: 999px; overflow: hidden; background: var(--chip-bg); }
+    .activity-track::before { content: ""; position: absolute; inset: 8px 0 auto; height: 2px; background: color-mix(in srgb, var(--lane-color) 24%, var(--border)); }
+    .activity-pulse { position: absolute; top: 4px; width: 10px; height: 10px; margin-left: -5px; border: 2px solid var(--surface); border-radius: 50%; background: var(--lane-color); box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane-color) 15%, transparent); }
+    .activity-progress { height: 6px; border-radius: 999px; overflow: hidden; background: var(--chip-bg); }
+    .activity-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--lane-color); }
+    .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .status-card { min-height: 126px; padding: 18px; display: flex; align-items: center; gap: 16px; }
+    .round-icon { width: 54px; height: 54px; flex: 0 0 auto; border-radius: 50%; display: grid; place-items: center; color: var(--blue); background: var(--blue-soft); }
+    .round-icon.green { color: var(--green); background: var(--green-soft); }
+    .round-icon.amber { color: var(--amber); background: var(--amber-soft); }
+    .round-icon.purple { color: #6f42d9; background: #f0eaff; }
+    .status-copy { min-width: 0; display: grid; gap: 5px; }
+    .status-copy strong { font-size: calc(16px * var(--font-scale)); }
+    .status-copy span { overflow-wrap: anywhere; }
+
+    .steps { padding: 22px 36px; display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: 22px; }
+    .step { display: flex; align-items: center; justify-content: center; gap: 12px; font-weight: 650; }
+    .step-number { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; color: white; background: var(--blue); font-size: calc(13px * var(--font-scale)); }
+    .step-arrow { color: var(--subtle); }
+    .security-note { padding: 14px 36px; border-top: 1px solid var(--border); color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .device-list { display: grid; gap: 12px; }
+    .device-card { min-height: 116px; padding: 18px 20px; display: grid; grid-template-columns: minmax(220px, 1.4fr) minmax(180px, 1fr) auto; align-items: center; gap: 18px; }
+    .device-title { display: flex; align-items: center; gap: 10px; }
+    .device-meta { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .device-code { display: inline-flex; align-items: center; gap: 7px; max-width: 250px; }
+    .device-code code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .copy-code { width: 28px; height: 28px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; }
+    .copy-code:hover { color: var(--blue); background: var(--blue-soft); }
+    .device-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+    .verification { display: grid; justify-items: center; gap: 5px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+    .verification-code { color: var(--blue); font-size: calc(32px * var(--font-scale)); font-weight: 720; letter-spacing: .18em; font-variant-numeric: tabular-nums; }
+
+    .cross-toolbar { display: grid; grid-template-columns: 1fr auto; gap: 14px; }
+    .toolbar-status, .toolbar-actions { padding: 14px 18px; min-height: 58px; }
+    .toolbar-actions { display: flex; align-items: center; gap: 8px; }
+    .cross-grid { margin-top: 16px; display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; }
+    .layout-card { padding: 20px; }
+    .layout-workspace { margin-top: 16px; display: grid; grid-template-columns: minmax(420px, 1.5fr) minmax(230px, .7fr); gap: 16px; }
+    .layout-cross { position: relative; min-height: 430px; display: grid; grid-template: 1fr 1fr 1fr / 1fr 1fr 1fr; gap: 10px; align-items: stretch; }
+    .layout-slot, .layout-host { min-width: 0; min-height: 118px; border: 2px dashed var(--slot-border); border-radius: 10px; display: grid; place-items: center; padding: 12px; color: var(--muted); background: var(--slot-bg); text-align: center; transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease; }
+    .layout-slot[data-placement="above"] { grid-area: 1 / 2; }
+    .layout-slot[data-placement="left"] { grid-area: 2 / 1; }
+    .layout-host { grid-area: 2 / 2; border-style: solid; border-color: var(--blue); color: var(--text); background: var(--blue-soft); }
+    .layout-slot[data-placement="right"] { grid-area: 2 / 3; }
+    .layout-slot[data-placement="below"] { grid-area: 3 / 2; }
+    .layout-slot.occupied { border-style: solid; border-color: var(--peer-border); color: var(--peer-text); background: var(--peer-bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--peer-border) 12%, transparent); }
+    .layout-slot.drag-over { border-color: var(--blue); background: var(--blue-soft); }
+    .layout-slot.applying {
+      position: relative;
+      overflow: hidden;
+      border-style: solid;
+      border-color: var(--blue);
+      color: var(--text);
+      background: color-mix(in srgb, var(--blue-soft) 78%, var(--surface));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 14%, transparent), 0 0 24px color-mix(in srgb, var(--peer-border) 16%, transparent);
+    }
+    .layout-slot.applying::before {
+      content: "";
+      position: absolute;
+      inset: -45%;
+      background: conic-gradient(from 90deg, transparent 0 58%, color-mix(in srgb, var(--peer-border) 34%, transparent) 72%, transparent 86%);
+      animation: applyingHalo 2.2s linear infinite;
+      pointer-events: none;
+    }
+    .layout-slot.applying > * { position: relative; z-index: 1; }
+    .layout-slot > span { display: grid; justify-items: center; gap: 5px; }
+    .layout-device { width: 100%; display: grid; justify-items: center; gap: 6px; cursor: grab; }
+    .layout-device:active { cursor: grabbing; }
+    .layout-device .icon { width: 34px; height: 34px; }
+    .layout-device strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .peer-role { padding: 2px 8px; border-radius: 999px; color: var(--peer-text); background: color-mix(in srgb, var(--peer-border) 17%, transparent); font-size: calc(11px * var(--font-scale)); font-weight: 680; }
+    .layout-connector { position: absolute; z-index: 3; width: 34px; height: 34px; border: 1px solid var(--peer-border); border-radius: 50%; display: grid; place-items: center; color: var(--peer-text); background: var(--surface); box-shadow: 0 4px 12px rgba(20, 48, 70, .14); pointer-events: none; }
+    .layout-connector .icon { width: 17px; height: 17px; }
+    .layout-connector::after { content: ""; position: absolute; inset: -1px; border: 1px solid var(--peer-border); border-radius: inherit; animation: connectionPulse 2.2s ease-out infinite; }
+    .layout-connector.applying { color: var(--blue); border-color: var(--blue); }
+    .layout-connector.applying::after { border-color: var(--blue); animation-duration: 1.25s; }
+    .layout-connector.above { left: 50%; top: 33.333%; transform: translate(-50%, -50%); }
+    .layout-connector.left { left: 33.333%; top: 50%; transform: translate(-50%, -50%); }
+    .layout-connector.right { left: 66.667%; top: 50%; transform: translate(-50%, -50%); }
+    .layout-connector.below { left: 50%; top: 66.667%; transform: translate(-50%, -50%); }
+    @keyframes connectionPulse { 0%, 42% { opacity: .5; transform: scale(1); } 78%, 100% { opacity: 0; transform: scale(1.55); } }
+    @keyframes applyingHalo { to { transform: rotate(1turn); } }
+    @keyframes spinnerTurn { to { transform: rotate(1turn); } }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      border: 2px solid color-mix(in srgb, currentColor 26%, transparent);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spinnerTurn .8s linear infinite;
+    }
+    .layout-applying-device { width: 100%; display: grid; justify-items: center; gap: 6px; }
+    .layout-applying-device .icon { width: 34px; height: 34px; }
+    .applying-status { display: inline-flex; align-items: center; justify-content: center; gap: 8px; color: var(--blue); font-weight: 680; }
+    .applying-detail { max-width: 220px; color: var(--muted); font-size: calc(12px * var(--font-scale)); line-height: 1.45; }
+    .layout-device-list { padding: 18px; display: grid; align-content: start; gap: 10px; }
+    .layout-device-list h3 { margin-bottom: 4px; }
+    .draggable-peer { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 9px; display: flex; align-items: center; gap: 10px; background: var(--surface-raised); cursor: grab; }
+    .draggable-peer:active { cursor: grabbing; }
+    .draggable-peer div { min-width: 0; display: grid; gap: 2px; }
+    .draggable-peer strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .draggable-peer.offline { cursor: not-allowed; opacity: .58; }
+    .draggable-peer.applying { cursor: wait; opacity: .62; }
+    .draggable-peer.applying .spinner { color: var(--blue); }
+    .layout-sync-note { margin-top: auto; padding: 12px; border-radius: 8px; color: var(--blue); background: var(--blue-soft); font-size: calc(12px * var(--font-scale)); line-height: 1.6; }
+    .monitor { width: min(76%, 390px); min-height: 82px; border: 2px solid var(--border-strong); border-radius: 9px; background: var(--surface-raised); display: flex; align-items: center; justify-content: center; gap: 12px; font-weight: 630; }
+    .monitor.remote { border-color: var(--blue); color: var(--text); background: var(--blue-soft); box-shadow: 0 0 0 3px rgba(23,105,232,.08); }
+    .monitor-grip { margin-left: auto; margin-right: 10px; color: var(--subtle); letter-spacing: -1px; }
+    .monitor-connector { height: 44px; border-left: 2px dashed var(--blue); position: relative; }
+    .monitor-connector::before, .monitor-connector::after { content: ""; position: absolute; left: -5px; border-left: 4px solid transparent; border-right: 4px solid transparent; }
+    .monitor-connector::before { top: -1px; border-bottom: 6px solid var(--blue); }
+    .monitor-connector::after { bottom: -1px; border-top: 6px solid var(--blue); }
+    .segments { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+    .segment { min-height: 42px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--surface); color: var(--text); }
+    .segment.active { color: white; border-color: var(--blue); background: var(--blue); }
+    .settings-list { padding: 4px 22px; }
+    .setting-row { min-height: 76px; padding: 14px 0; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .setting-row + .setting-row { border-top: 1px solid var(--border); }
+    .setting-label { min-width: 0; display: grid; gap: 5px; }
+    .range-control { min-width: 0; display: grid; grid-template-columns: 1fr 86px; align-items: center; gap: 12px; }
+    .value-box { min-height: 38px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 7px; font-variant-numeric: tabular-nums; }
+    .compat { margin-top: 16px; padding: 20px; }
+    .compat-grid { margin-top: 12px; display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 18px; }
+    .compat ul { margin: 0; padding-left: 20px; color: var(--muted); font-size: calc(13px * var(--font-scale)); line-height: 1.9; }
+    .boundary-card { margin-top: 16px; padding: 20px 22px 22px; }
+    .boundary-header { padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .boundary-header .muted { display: block; margin-top: 5px; }
+    .boundary-master { min-height: 72px; padding: 14px 2px; }
+    .boundary-panel { padding: 16px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); }
+    .boundary-range { display: grid; grid-template-columns: 1fr 86px; align-items: end; gap: 14px; }
+    .boundary-range .setting-label { grid-column: 1 / -1; }
+    .boundary-options { margin-top: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .boundary-option { min-width: 0; min-height: 74px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 14px; background: var(--surface); }
+    .cursor-locator-tip { margin-top: 14px; min-height: 68px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 8px; display: flex; align-items: center; gap: 12px; background: var(--surface); }
+    .cursor-locator-tip > .icon { flex: none; color: var(--blue); }
+    .cursor-locator-tip .setting-label { flex: 1; }
+    .shortcut-keys { flex: none; display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: calc(11px * var(--font-scale)); }
+    .shortcut-keys kbd { min-width: 58px; padding: 5px 8px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 6px; background: var(--surface-raised); color: var(--text); font: inherit; font-weight: 650; text-align: center; }
+
+    .master-card { min-height: 126px; padding: 22px 24px; }
+    .capability-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .capability { min-height: 152px; padding: 20px; display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 15px; }
+    .capability-check { grid-column: 2; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .sync-card { padding: 20px 24px; }
+    .sync-route { margin: 18px 0; display: grid; grid-template-columns: 1fr minmax(120px, 1fr) 1fr; gap: 16px; align-items: center; }
+    .device-box { min-height: 60px; border: 1px solid var(--border-strong); border-radius: 8px; display: flex; align-items: center; justify-content: center; gap: 10px; background: var(--surface-raised); }
+    .route-arrow { height: 2px; position: relative; background: repeating-linear-gradient(90deg, var(--blue) 0 5px, transparent 5px 10px); }
+    .route-arrow::after { content: ""; position: absolute; right: -1px; top: -5px; border-top: 6px solid transparent; border-bottom: 6px solid transparent; border-left: 9px solid var(--blue); }
+    .sync-facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .info-strip { min-height: 88px; padding: 16px 22px; display: flex; align-items: center; gap: 18px; }
+
+    .transfer-summary { min-height: 112px; padding: 18px 22px; display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; gap: 28px; }
+    .transfer-item { padding: 18px 20px; display: grid; grid-template-columns: minmax(250px, 1.2fr) minmax(250px, 1.2fr) auto; align-items: center; gap: 20px; }
+    .progress-wrap { display: grid; gap: 9px; }
+    .progress { height: 6px; overflow: hidden; border-radius: 999px; background: var(--track); }
+    .progress i { display: block; height: 100%; border-radius: inherit; background: var(--blue); }
+    .transfer-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .transfer-actions .details { grid-column: 1 / -1; }
+    .pending-card { min-height: 84px; padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .preference-grid { display: grid; grid-template-columns: 1fr 1fr; }
+    .preference-grid .setting-row { padding: 18px 20px; }
+    .preference-grid .setting-row:nth-child(odd) { border-right: 1px solid var(--border); }
+    .preference-grid .setting-row:nth-child(n+3) { border-top: 1px solid var(--border); }
+    .stepper { display: flex; align-items: center; gap: 6px; }
+    .stepper button { width: 36px; height: 36px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface); }
+    .stepper output { min-width: 72px; height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
+    .stepper-input-wrap { height: 36px; min-width: 86px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; display: flex; align-items: center; background: var(--surface); }
+    .stepper-input-wrap:focus-within { border-color: var(--blue); outline: 3px solid rgba(23,105,232,.12); }
+    .stepper-input { width: 58px; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; text-align: right; font-variant-numeric: tabular-nums; }
+    .stepper-unit { color: var(--muted); white-space: nowrap; }
+
+    .connection-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .55fr); gap: 16px; }
+    .discovery-card { padding: 20px 22px; }
+    .discovery-facts { margin-top: 18px; display: grid; grid-template-columns: 1fr 1fr; }
+    .connection-form { padding: 22px; }
+    .device-select { margin-top: 10px; }
+    .endpoint-grid { margin-top: 18px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 14px; }
+    .field { display: grid; gap: 7px; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .validation { margin-top: 16px; min-height: 44px; padding: 10px 12px; border: 1px solid #bde2c5; border-radius: 7px; display: flex; align-items: center; gap: 9px; color: var(--green); background: var(--green-soft); }
+    .connection-help { padding: 22px; color: var(--muted); }
+    .connection-help ul { padding-left: 20px; line-height: 1.8; }
+
+    .general-page { font-size: calc(14px * var(--font-scale)); }
+    .general-page h1 { font-size: calc(28px * var(--font-scale)); }
+    .general-page .subtitle { font-size: calc(14px * var(--font-scale)); }
+    .general-page .section-title h2 { font-size: calc(18px * var(--font-scale)); }
+    .general-page .button, .general-page .select { font-size: calc(14px * var(--font-scale)); }
+    .general-card { overflow: hidden; }
+    .general-row { min-height: 80px; padding: 14px 18px; display: flex; align-items: center; gap: 16px; }
+    .general-row + .general-row { border-top: 1px solid var(--border); }
+    .general-row .setting-label { flex: 1; }
+    .general-row .setting-label h2, .general-row .setting-label h3 { font-size: calc(16px * var(--font-scale)); }
+    .general-row .setting-label > .muted { font-size: calc(14px * var(--font-scale)); }
+    .general-page .round-icon { width: 46px; height: 46px; }
+    .general-page .round-icon .icon.large { width: 26px; height: 26px; }
+    .general-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+    .language-select { width: min(260px, 42vw); }
+    .font-scale-control { width: min(360px, 46vw); display: grid; grid-template-columns: 1fr 64px; align-items: center; gap: 12px; }
+    .font-scale-control output { min-height: 38px; border: 1px solid var(--border); border-radius: 7px; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
+    .background-flow { margin: 0 18px 18px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 9px; display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: 12px; text-align: center; color: var(--muted); font-size: calc(13px * var(--font-scale)); background: var(--surface-raised); }
+    .flow-item { display: grid; justify-items: center; gap: 9px; }
+    .flow-arrow { color: var(--blue); }
+    .general-compat { padding: 18px; }
+    .general-compat-grid { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(420px, 1.6fr) auto; align-items: center; gap: 18px; }
+    .compat-identity { min-width: 0; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 14px; }
+    .compat-identity .round-icon { grid-row: 1 / span 2; }
+    .compat-identity .button { justify-self: start; margin-top: 6px; }
+    .compat-notes { margin: 0; padding: 0 18px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); display: grid; gap: 8px; list-style: none; color: var(--muted); font-size: calc(13px * var(--font-scale)); line-height: 1.5; }
+    .compat-notes li { display: flex; align-items: flex-start; gap: 8px; }
+    .compat-notes .icon { width: 16px; height: 16px; margin-top: 2px; color: var(--subtle); }
+    .danger-card { border-color: #f0d0d4; }
+
+    .support-hero { position: relative; min-height: 214px; padding: 30px 32px; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 28px; }
+    .support-hero::after { content: ""; position: absolute; right: -62px; top: -98px; width: 260px; height: 260px; border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--blue) 16%, transparent) 0 38%, color-mix(in srgb, var(--blue) 7%, transparent) 39% 57%, transparent 58%); pointer-events: none; }
+    .support-hero-copy { position: relative; z-index: 1; max-width: 760px; }
+    .support-eyebrow { margin-bottom: 9px; color: var(--blue); font-size: calc(12px * var(--font-scale)); font-weight: 720; letter-spacing: .06em; }
+    .support-hero h2 { font-size: calc(28px * var(--font-scale)); letter-spacing: -.025em; }
+    .support-hero p { max-width: 720px; margin: 12px 0 0; color: var(--story-text); }
+    .support-promise { margin-top: 17px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .support-promise span { min-height: 30px; padding: 5px 11px; border: 1px solid color-mix(in srgb, var(--green) 34%, var(--border)); border-radius: 999px; display: inline-flex; align-items: center; gap: 6px; color: var(--green); background: var(--green-soft); font-size: calc(12px * var(--font-scale)); font-weight: 660; }
+    .support-heart { position: relative; z-index: 1; width: 112px; height: 112px; border: 1px solid color-mix(in srgb, var(--blue) 24%, var(--border)); border-radius: 32px; display: grid; place-items: center; color: var(--blue); background: color-mix(in srgb, var(--blue-soft) 82%, var(--surface)); transform: rotate(4deg); box-shadow: 0 18px 40px color-mix(in srgb, var(--blue) 14%, transparent); }
+    .support-heart .icon { width: 52px; height: 52px; fill: color-mix(in srgb, var(--blue) 14%, transparent); stroke-width: 1.55; }
+    .support-section-head { margin: 24px 0 12px; display: flex; align-items: end; justify-content: space-between; gap: 18px; }
+    .support-section-head div { display: grid; gap: 4px; }
+    .support-section-head p { margin: 0; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .support-pay-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .support-pay-card { min-width: 0; padding: 20px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 42%); align-items: center; gap: 20px; overflow: hidden; }
+    .support-provider-copy { min-width: 0; align-self: stretch; display: grid; align-content: center; gap: 9px; }
+    .support-provider-title { display: flex; align-items: center; gap: 10px; }
+    .support-provider-mark { width: 38px; height: 38px; flex: 0 0 auto; border-radius: 11px; display: grid; place-items: center; color: white; font-size: 18px; font-weight: 760; }
+    .support-provider-mark.wechat { background: #07c160; }
+    .support-provider-mark.alipay { background: #1677ff; }
+    .support-provider-copy p { margin: 0; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .support-provider-copy .button { justify-self: start; margin-top: 4px; }
+    .support-qr-preview { width: 100%; max-height: 302px; border: 1px solid var(--border); border-radius: 12px; display: block; object-fit: contain; background: #fff; }
+    .support-note { margin-top: 16px; padding: 18px 22px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 14px; }
+    .support-note > .icon { margin-top: 2px; color: var(--green); }
+    .support-note p { margin: 4px 0 0; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .support-other { margin-top: 16px; padding: 22px 24px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; }
+    .support-other p { margin: 6px 0 0; color: var(--muted); }
+    .support-qr-modal { width: min(620px, 100%); max-height: calc(100vh - 48px); overflow: auto; text-align: center; }
+    .support-qr-modal p { margin-bottom: 14px; }
+    .support-qr-large { width: min(430px, 100%); max-height: calc(100vh - 230px); margin: 0 auto; border: 1px solid var(--border); border-radius: 14px; display: block; object-fit: contain; background: #fff; }
+    .support-qr-modal .modal-actions { margin-top: 16px; }
+
+    .about-hero { padding: 28px 32px; display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: center; }
+    .about-logo { width: 132px; height: 132px; padding: 16px; border-radius: 24px; object-fit: contain; background: #071545; box-shadow: 0 12px 30px rgba(7, 21, 69, .16); }
+    .about-name { font-size: calc(36px * var(--font-scale)); font-weight: 720; letter-spacing: -.03em; }
+    .badges { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge { padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); background: var(--surface-raised); font-size: calc(13px * var(--font-scale)); }
+    .about-grid { margin-top: 16px; display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; }
+    .about-story, .project-info { padding: 24px 28px; }
+    .about-story p { margin: 14px 0 0; color: var(--story-text); }
+    .info-table { margin-top: 14px; }
+    .info-row { min-height: 52px; display: grid; grid-template-columns: 105px 1fr; align-items: center; gap: 12px; border-top: 1px solid var(--border); }
+    .quote { margin-top: 16px; padding: 24px; text-align: center; color: var(--blue); font-size: calc(20px * var(--font-scale)); font-weight: 660; }
+    .about-support { margin-top: 16px; padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; background: linear-gradient(135deg, var(--surface), color-mix(in srgb, var(--blue-soft) 52%, var(--surface))); }
+    .about-support-copy { min-width: 0; display: grid; gap: 4px; }
+    .about-support-copy p { margin: 0; color: var(--muted); }
+    .license-card { padding: 24px 28px; display: grid; gap: 20px; }
+    .license-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px 24px; }
+    .license-identity { min-width: 0; display: flex; align-items: center; gap: 16px; }
+    .license-title { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .license-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .license-notice { margin: 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+    .license-notice.amber { border-color: color-mix(in srgb, var(--amber) 48%, var(--border)); }
+    .license-form { display: grid; gap: 8px; }
+    .license-form-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+    .license-facts { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); }
+    .license-fact { min-width: 0; padding: 14px 18px; display: grid; gap: 4px; }
+    .license-fact + .license-fact { border-left: 1px solid var(--border); }
+    .license-fact span { color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+    .license-fact strong { font-weight: 600; overflow-wrap: anywhere; }
+    .license-footnote { margin: 0; }
+    .license-guide { margin-top: 16px; padding: 24px 28px; display: grid; gap: 18px; }
+    .license-steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+    .license-steps li { display: flex; align-items: center; gap: 12px; }
+    .license-steps .step-number { flex: 0 0 auto; }
+    .license-cases { padding-top: 16px; border-top: 1px solid var(--border); display: grid; gap: 10px; }
+    .license-cases h3 { color: var(--muted); font-size: calc(14px * var(--font-scale)); }
+    .license-case { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.6fr); gap: 12px; }
+    .license-case span:first-child { color: var(--muted); }
+
+    .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: rgba(15, 23, 42, .34); }
+    .modal { width: min(460px, 100%); padding: 24px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: 0 24px 70px rgba(20,31,51,.24); }
+    .modal.wide { width: min(720px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; }
+    .modal p { margin: 10px 0 20px; color: var(--muted); }
+    .modal-section { padding: 14px 0; border-top: 1px solid var(--border); }
+    .modal-section:first-of-type { border-top: 0; }
+    .modal-section h3 { margin: 0 0 7px; font-size: calc(15px * var(--font-scale)); }
+    .modal-section p { margin: 0; line-height: 1.7; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+    .toast { position: fixed; left: 50%; bottom: 28px; z-index: 60; max-width: min(520px, calc(100% - 48px)); transform: translate(-50%, 16px); padding: 10px 16px; border-radius: 8px; color: white; background: rgba(23,32,51,.95); box-shadow: 0 10px 30px rgba(0,0,0,.2); opacity: 0; pointer-events: none; transition: opacity 150ms ease, transform 150ms ease; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .toast.top { top: 70px; bottom: auto; transform: translate(-50%, -18px); padding: 12px 20px; border: 1px solid var(--border-strong); color: var(--text); background: color-mix(in srgb,var(--surface) 96%,transparent); box-shadow: 0 14px 34px rgba(20,31,51,.22); font-weight: 650; }
+    .toast.top.show { transform: translate(-50%, 0); }
+    .toast.top.success { border-color: color-mix(in srgb,var(--green) 58%,var(--border)); }
+    .toast.top.success::before { content:'✓'; display:inline-grid; place-items:center; width:21px; height:21px; margin-right:9px; border-radius:50%; color:white; background:var(--green); font-size:13px; }
+    .empty { min-height: 110px; display: grid; place-items: center; padding: 20px; color: var(--muted); text-align: center; }
+    .resize-handle { position: fixed; z-index: 100; }
+    .resize-handle[data-edge="top"], .resize-handle[data-edge="bottom"] { left: 8px; right: 8px; height: 8px; }
+    .resize-handle[data-edge="left"], .resize-handle[data-edge="right"] { top: 8px; bottom: 8px; width: 8px; }
+    .resize-handle[data-edge="top"] { top: 0; cursor: ns-resize; }
+    .resize-handle[data-edge="bottom"] { bottom: 0; cursor: ns-resize; }
+    .resize-handle[data-edge="left"] { left: 0; cursor: ew-resize; }
+    .resize-handle[data-edge="right"] { right: 0; cursor: ew-resize; }
+    .resize-handle.corner { width: 14px; height: 14px; }
+    .resize-handle[data-edge="top-left"] { left: 0; top: 0; cursor: nwse-resize; }
+    .resize-handle[data-edge="top-right"] { right: 0; top: 0; cursor: nesw-resize; }
+    .resize-handle[data-edge="bottom-left"] { left: 0; bottom: 0; cursor: nesw-resize; }
+    .resize-handle[data-edge="bottom-right"] { right: 0; bottom: 0; cursor: nwse-resize; }
+
+    @media (max-width: 1100px) {
+      :root { --sidebar: 226px; }
+      .content { padding: 26px 24px 38px; }
+      .status-grid { grid-template-columns: repeat(2, 1fr); }
+      .telemetry-layout { grid-template-columns: 1fr; }
+      .workspace-summary { grid-template-columns: 1fr; }
+      .local-summary { padding: 0 0 20px; border-right: 0; border-bottom: 1px solid var(--border); }
+      .cross-grid, .connection-layout, .about-grid { grid-template-columns: 1fr; }
+      .support-pay-grid { grid-template-columns: 1fr; }
+      .support-pay-card { grid-template-columns: minmax(0, 1fr) minmax(190px, 34%); padding: 18px; }
+      .layout-workspace { grid-template-columns: 1fr; }
+      .general-compat-grid { grid-template-columns: 1fr; align-items: start; }
+      .compat-notes { padding: 14px 0; border: 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+      .connection-help { display: none; }
+      .capability-grid { grid-template-columns: 1fr; }
+      .transfer-summary { grid-template-columns: 1fr 1fr; }
+      .device-card, .transfer-item { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      :root { --sidebar: 78px; --topbar: 62px; font-size: 15px; }
+      .topbar { padding: 0 12px 0 16px; }
+      .brand strong { display: none; }
+      .appearance-toggle span { display: none; }
+      .appearance-toggle { width: 38px; justify-content: center; padding: 0; }
+      .connection-pill { display: none; }
+      .window-button { width: 36px; height: 34px; }
+      .sidebar { padding: 16px 8px; }
+      .nav-button { justify-content: center; padding: 0; min-height: 52px; }
+      .nav-label { display: none; }
+      .content { padding: 22px 16px 32px; }
+      h1 { font-size: 25px; }
+      .peer-overview-row { grid-template-columns: 1fr auto; }
+      .peer-route { grid-column: 1 / -1; padding-left: 52px; }
+      .facts, .sync-facts, .preference-grid { grid-template-columns: 1fr; }
+      .fact + .fact { border-left: 0; border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+      .status-grid { grid-template-columns: 1fr; }
+      .telemetry-head { align-items: stretch; flex-direction: column; }
+      .telemetry-layout { padding: 0 12px 12px; }
+      .latency-panel, .activity-panel { padding: 10px; }
+      .latency-chart { height: 210px; }
+      .status-alert { grid-template-columns: auto minmax(0, 1fr); }
+      .status-alert .button { grid-column: 1 / -1; width: 100%; }
+      .steps { grid-template-columns: 1fr; }
+      .step-arrow { transform: rotate(90deg); text-align: center; }
+      .cross-toolbar { grid-template-columns: 1fr; }
+      .toolbar-actions { flex-wrap: wrap; }
+      .cross-grid { grid-template-columns: 1fr; }
+      .layout-cross { min-height: 390px; }
+      .endpoint-grid { grid-template-columns: 1fr; }
+      .endpoint-grid > .icon { transform: rotate(90deg); margin: 0 auto; }
+      .sync-route { grid-template-columns: 1fr; }
+      .route-arrow { width: 2px; height: 40px; margin: 0 auto; background: repeating-linear-gradient(180deg, var(--blue) 0 5px, transparent 5px 10px); }
+      .route-arrow::after { right: -4px; top: auto; bottom: -1px; transform: rotate(90deg); }
+      .transfer-summary { grid-template-columns: 1fr; }
+      .preference-grid .setting-row { border-right: 0 !important; border-top: 1px solid var(--border); }
+      .background-flow { grid-template-columns: 1fr; }
+      .boundary-options { grid-template-columns: 1fr; }
+      .general-row:has(> .language-select), .general-row:has(> .font-scale-control) { flex-wrap: wrap; }
+      .language-select, .font-scale-control { flex: 0 0 calc(100% - 62px); width: auto; margin-left: 62px; }
+      .flow-arrow { transform: rotate(90deg); }
+      .about-hero { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+      .about-logo { width: 96px; height: 96px; }
+      .support-hero { grid-template-columns: 1fr; padding: 24px; }
+      .support-heart { display: none; }
+      .support-pay-grid { grid-template-columns: 1fr; }
+      .support-pay-card { grid-template-columns: minmax(0, 1fr) minmax(180px, 42%); }
+      .support-other, .about-support { align-items: stretch; grid-template-columns: 1fr; }
+      .about-support { display: grid; }
+      .license-card, .license-guide { padding: 20px; }
+      .license-facts, .license-form-row, .license-case { grid-template-columns: 1fr; }
+      .license-fact + .license-fact { border-left: 0; border-top: 1px solid var(--border); }
+      .license-case { gap: 2px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+    /*__BOUNDARY_EDITOR_CSS__*/
+    /*__SSH_CSS__*/
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script>
+    const pages = [
+      ['status', '状态总览', 'monitor'],
+      ['devices', '设备与配对', 'devices'],
+      ['cross', '跨屏控制', 'screens'],
+      ['clipboard', '共享剪贴板', 'clipboard'],
+      ['transfer', '传输中心', 'download'],
+      ['remote', '远程工作', 'monitor'],
+      ['connection', '连接设置', 'link'],
+      ['general', '常规', 'settings'],
+      ['license', '激活与授权', 'lock'],
+      ['support', '支持作者', 'heart'],
+      ['about', '关于', 'info']
+    ];
+    // Community builds ship without the license gate: they offer "Support the author" instead of the license page.
+    // Official (licensing) builds offer the license page and carry no donation entry.
+    function visiblePages() {
+      const licensed = currentModel().licenseEnabled;
+      return pages.filter(([key]) => key === 'license' ? licensed : key === 'support' ? !licensed : true);
+    }
+
+    const state = { page: 'status', model: null, modal: null, connectionDraft: null, interacting: false, modelDirty: false, draggedPeer: '', pendingLayout: null, pendingLayoutTimer: 0, scrollByPage: Object.create(null), scrollResetPage: '', selectionTimer: 0, sshHostKeysOpen: false, sshConnectionHostKeysOpen: false, telemetry: { lastSampleAt: 0, links: Object.create(null), events: [], sharedGeneration: null, transferGeneration: null } };
+
+    const demoModel = {
+      type: 'model', licenseEnabled: true, version: '1.0.0', language: 'zh-CN', theme: 'light', fontScale: 100, connected: true, peerLabel: 'DESKTOP-STUDIO', localLabel: 'THIS-PC',
+      pairSwitches: [{ fingerprint: 'AA:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF', label: 'DESKTOP-STUDIO', online: true, enabled: true, revision: 2 }, { fingerprint: 'BB:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF', label: 'BIM', online: false, enabled: false, revision: 1 }],
+      localFingerprint: '12:34:56:78:9A:BC:DE:F0:10:32:54:76:98:BA:DC:FE:01:23:45:67:89:AB:CD:EF:11:22:33:44:55:66:77:88', autostart: true, autostartLastResult: 'ok', autostartLastRun: '2026-10-21 08:30:12',
+      discovery: { running: true, issue: '', peersFound: 1 },
+      discovered: [{ fingerprint: 'A7:42:9D:18:77:03:C1', label: 'LAPTOP-OFFICE', address: '192.168.1.3', pairable: true }],
+      peers: [
+        { fingerprint: 'BC:9A:78:56:34:12:43:E8:10:22:48:9C:17:75:31:AC', label: 'DESKTOP-STUDIO', endpoint: '192.168.1.3:45233', online: true, current: true, screen: { pixelWidth: 2560, pixelHeight: 1440, physicalWidthMillimeters: 344, physicalHeightMillimeters: 194 } },
+        { fingerprint: '62:32:9C:2A:51:88:04:7E:29:31:16:CD:77:A9:21:02', label: 'LAPTOP-7H8K3D', endpoint: '', online: false, current: false },
+        { fingerprint: '15:AE:36:CA:0B:19:53:41:2C:9E:F7:75:34:08:AA:10', label: 'OFFICE-PC', endpoint: '192.168.1.8:45233', online: true, current: false }
+      ],
+      pairing: null,
+      connection: { configured: true, activePeer: 'BC:9A:78:56:34:12:43:E8:10:22:48:9C:17:75:31:AC', localEndpoint: '192.168.1.2:45233', peerEndpoint: '192.168.1.3:45233', autoReceive: true, valid: true },
+      cross: { enabled: true, boundaryMapV2Enabled: true, state: '运行中', placement: 'above', cornerGuardEnabled: true, cornerGuardPixels: 198, requireSecondPush: true, pauseOnFullscreen: false, latency: '1.8 ms', admin: false, connections: { schema:1, onlineCount:2, peerCount:2, peers:[
+        { fingerprint:'BC:9A:78:56:34:12:43:E8:10:22:48:9C:17:75:31:AC', endpoint:'192.168.1.3:45234', online:true, generation:2, attempts:1, roundTripMicros:1800, lastError:null },
+        { fingerprint:'15:AE:36:CA:0B:19:53:41:2C:9E:F7:75:34:08:AA:10', endpoint:'192.168.1.8:45234', online:true, generation:1, attempts:1, roundTripMicros:3200, lastError:null }
+      ] } },
+      boundaryMap: { schemaVersion: 2, revision: 0, segments: [
+        { id:'demo-b', peerFingerprint:'BC:9A:78:56:34:12:43:E8:10:22:48:9C:17:75:31:AC', edge:'top', start:8192, end:32768 },
+        { id:'demo-c-top', peerFingerprint:'15:AE:36:CA:0B:19:53:41:2C:9E:F7:75:34:08:AA:10', edge:'top', start:32768, end:58777, groupId:'demo-corner', corner:'top_right' },
+        { id:'demo-c-right', peerFingerprint:'15:AE:36:CA:0B:19:53:41:2C:9E:F7:75:34:08:AA:10', edge:'right', start:12014, end:30000, groupId:'demo-corner', corner:'top_right' }
+      ]},
+      boundaryMapAdjusted: false, boundaryMapError: '', boundaryWorkspaceV3: null, boundaryWorkspaceV3Applied: false, boundaryWorkspaceV3Error: '', boundaryRemoteWorkspace: null, boundaryWorkspaceV3RuntimeReady: false, boundaryMultiPeerRuntimeReady: false,
+      boundaryScreen: { width:1920, height:1080, physicalWidthMillimeters:598, physicalHeightMillimeters:336, normalizedEdgeLength:65536, minimumSegmentPixels:64 },
+      shared: { enabled: true, generation: 3, lastDirection: '发送', lastFormats: '文字 + HTML', lastBytes: '12.6 KB', lastUnits: 2184 },
+      transfer: { generation: 2, pendingOffer: false, autoPopup: true, historyLimit: 20, rowHeight: 76, tasks: [{ key: 'receive-1', name: 'project-assets.zip', files: 24, directories: 2, direction: '接收', directionDetail: 'DESKTOP-STUDIO → 本机', state: '正在接收', stateCode: 'running', progress: 36.3, transferred: '186 MB', total: '512 MB', speed: '24.8 MB/s' }] },
+      recentManifest: { name: 'project-assets.zip', files: 24, directories: 2, size: '186 MB' },
+      lastError: '', logPath: '%LOCALAPPDATA%\\ClipFerry\\logs\\clipferry.log'
+    };
+
+    function svg(name, extra = '') {
+      const p = {
+        monitor: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+        devices: '<rect x="3" y="3" width="12" height="15" rx="2"/><path d="M7 21h10"/><rect x="14" y="10" width="7" height="10" rx="2"/>',
+        screens: '<rect x="2" y="4" width="14" height="11" rx="2"/><path d="M6 19h6M9 15v4"/><rect x="13" y="10" width="9" height="10" rx="2"/>',
+        clipboard: '<path d="M9 5h6l1 2h3v14H5V7h3z"/><rect x="9" y="3" width="6" height="4" rx="2"/>',
+        download: '<path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 18v3h16v-3"/>',
+        link: '<path d="m10 13 4-4"/><path d="M7.5 16.5 5 19a3.5 3.5 0 0 1-5-5l4-4a3.5 3.5 0 0 1 5 0" transform="translate(2 -2)"/><path d="m16.5 7.5 2.5-2.5a3.5 3.5 0 0 1 5 5l-4 4a3.5 3.5 0 0 1-5 0" transform="translate(-2 2)"/>',
+        settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1V21H9.6v-.08A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1H3V10h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1V3h4v.08A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.52 1H21v4h-.08A1.7 1.7 0 0 0 19.4 15z"/>',
+        info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',
+        lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+        shield: '<path d="M12 3 4.5 6v5.5c0 4.7 3.2 7.9 7.5 9.5 4.3-1.6 7.5-4.8 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>',
+        refresh: '<path d="M20 11a8 8 0 1 0 1 4"/><path d="M20 4v7h-7"/>',
+        copy: '<rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h2"/>',
+        eye: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/>',
+        'eye-off': '<path d="m3 3 18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c6.5 0 10 6 10 6a17.6 17.6 0 0 1-2.1 2.8M6.6 6.6C3.6 8.4 2 12 2 12s3.5 6 10 6a10 10 0 0 0 4-.8M10 10a2.8 2.8 0 0 0 4 4"/>',
+        clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+        user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+        file: '<path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/>',
+        image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m4 18 5-5 4 4 2-2 5 4"/>',
+        globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+        folder: '<path d="M3 6h7l2 2h9v12H3z"/>',
+        check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+        pause: '<path d="M9 7v10M15 7v10"/>',
+        play: '<path d="m9 7 8 5-8 5z"/>',
+        cancel: '<path d="m7 7 10 10M17 7 7 17"/>',
+        external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 13v7H4V6h7"/>',
+        arrow: '<path d="M5 12h14M14 7l5 5-5 5"/>',
+        power: '<path d="M12 2v10"/><path d="M5.5 6.5a9 9 0 1 0 13 0"/>',
+        log: '<path d="M6 2h9l4 4v16H6z"/><path d="M15 2v5h5M9 12h7M9 16h7"/>',
+        tray: '<path d="M4 4h16v12H4zM8 20h8M12 16v4"/>',
+        chevron: '<path d="m9 6 6 6-6 6"/>',
+        minus: '<path d="M5 12h14"/>',
+        square: '<rect x="6" y="6" width="12" height="12"/>',
+        close: '<path d="m6 6 12 12M18 6 6 18"/>',
+        sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>',
+        moon: '<path d="M20.5 14.2A8 8 0 0 1 9.8 3.5 8.5 8.5 0 1 0 20.5 14.2z"/>',
+        type: '<path d="M4 6V4h16v2M9 20h6M12 4v16"/>',
+        heart: '<path d="M20.8 4.7a5.5 5.5 0 0 0-7.8 0L12 5.8l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.4 1.1-1.1a5.5 5.5 0 0 0-.1-7.8z"/>'
+      };
+      return `<svg class="icon ${extra}" viewBox="0 0 24 24" aria-hidden="true">${p[name] || p.info}</svg>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function switchButton(on, action, label, disabled = false) {
+      return `<button class="switch ${on ? 'on' : ''}" role="switch" aria-checked="${on}" aria-label="${escapeHtml(label)}" data-action="${action}" ${disabled ? 'disabled' : ''}></button>`;
+    }
+    function chip(text, color = '') { return `<span class="chip ${color}">${escapeHtml(text)}</span>`; }
+    function currentModel() { return state.model || demoModel; }
+    function placementLabel(value) { return ({left:'左侧', right:'右侧', above:'上方', below:'下方'})[value] || '上方'; }
+    function clamp(value, min, max) { return Math.min(max, Math.max(min, Number(value))); }
+    function pendingLayoutMatches(model) {
+      if (!state.pendingLayout || !model?.cross) return false;
+      const current = (model.peers || []).find(peer => peer.current);
+      return current?.fingerprint === state.pendingLayout.fingerprint && model.cross.placement === state.pendingLayout.placement;
+    }
+    function clearPendingLayout() {
+      if (!state.pendingLayout) return false;
+      state.pendingLayout = null;
+      clearTimeout(state.pendingLayoutTimer);
+      state.pendingLayoutTimer = 0;
+      return true;
+    }
+    function beginPendingLayout(fingerprint, placement) {
+      clearPendingLayout();
+      state.pendingLayout = { fingerprint, placement };
+      state.pendingLayoutTimer = setTimeout(() => {
+        if (!state.pendingLayout) return;
+        clearPendingLayout();
+        render();
+        showToast('应用布局超时，请重试');
+      }, 20000);
+    }
+    function applyAppearance() {
+      const m = currentModel();
+      document.documentElement.dataset.theme = m.theme === 'dark' ? 'dark' : 'light';
+      document.documentElement.style.setProperty('--font-scale', String(clamp(m.fontScale || 100, 50, 125) / 100));
+    }
+
+    const en = new Map(Object.entries({'激活与授权':'Activation & license','远程工作':'Remote work','继续':'Resume',
+      'Pierdesk 设置':'Pierdesk Settings','状态总览':'Status overview','设备与配对':'Devices & pairing','跨屏控制':'Cross-screen control','共享剪贴板':'Shared clipboard','传输中心':'Transfer center','连接设置':'Connection','常规':'General','支持作者':'Support the author','关于':'About','设置已应用':'Settings applied','预览状态已更新':'Preview updated','完整设备码已复制':'Full device code copied',
+      '尚未连接':'Not connected','设置页面':'Settings pages','最小化':'Minimize','最大化':'Maximize','关闭':'Close','本机':'Local device','主屏幕':'Primary screen','在线':'Online','离线':'Offline','未配置':'Not configured','等待中':'Waiting','刷新状态':'Refresh','打开诊断日志':'Open diagnostic log','请打开诊断日志':'Open the diagnostic log','打开日志文件夹':'Open log folder','切换亮色/暗色模式':'Toggle light/dark mode','亮色模式':'Light mode','暗色模式':'Dark mode',
+      'Pierdesk 正在后台运行':'Pierdesk is running in the background','局域网发现':'LAN discovery','文件剪贴板':'File clipboard','最近远端清单':'Latest remote manifest','活动传输':'Active transfers','最近错误':'Latest error','控制提示':'Control notice','随 Windows 启动':'Start with Windows','所有服务状态正常':'All services are healthy','等待远端文件清单':'Waiting for a remote file manifest','当前没有传输':'No active transfer','纯文字、网页/富文本、截图/图片':'Text, rich text, screenshots and images','当前 Windows 用户':'Current Windows user','跨屏工作区':'Cross-screen workspace','工作区设备':'Workspace devices','连接正常':'Connections healthy','需要处理':'Needs attention','等待连接':'Waiting to connect','连接异常':'Connection issue','已连接':'Connected','正在连接':'Connecting','尚未加入远端设备':'No remote devices added','当前没有加入跨屏工作区的远端设备。':'No remote devices are in the cross-screen workspace.','未加入边界工作区':'Not in the boundary workspace','已加入布局':'In layout','最低延迟':'Lowest latency','实时链路':'Live links','逐台设备显示真实 TLS 心跳往返延迟':'Real TLS heartbeat round-trip latency for every device','实时更新 · 最近 90 秒':'Live · Last 90 seconds','活动脉冲':'Activity pulse','剪贴板触发':'Clipboard events','文件传输':'File transfers','跨屏链路':'Cross-screen links',
+      '发现并管理同一局域网中的可信设备':'Discover and manage trusted devices on this LAN','发现设备':'Discover device','核对验证码':'Verify code','完成配对':'Finish pairing','只有两台电脑显示的验证码一致时才允许配对':'Pair only when both computers show the same verification code','发现的新设备':'Newly discovered devices','正在扫描局域网':'Scanning the LAN','发现服务不可用':'Discovery unavailable','当前配对设备':'Current paired device','历史配对':'Pairing history','保留可信身份，设备上线后可快速切换':'Trusted identities are retained for quick switching when devices come online','当前没有活动设备，可从历史配对中快速切换。':'No active device. Switch quickly from pairing history.','还没有其他历史配对设备。':'No other devices in pairing history.','当前没有已配对设备。':'No paired devices.','取消配对后，需要重新核对验证码才能连接。':'After unpairing, the verification code must be checked again.','可配对':'Ready to pair','当前设备':'Current device','地址等待发现':'Waiting for address discovery','双向 TLS 1.3':'Mutual TLS 1.3','最近连接：刚刚':'Last connected: just now','当前未发现':'Currently unavailable','切换到此设备':'Switch to this device','取消配对':'Unpair','复制完整设备码':'Copy full device code','开始配对':'Start pairing','允许配对':'Allow pairing','拒绝':'Reject','双端验证码':'Verification code','请在两台电脑上核对':'Check on both computers','通过局域网发现':'Discovered over LAN','配对后保存双向 TLS 身份':'Pairing saves the mutual TLS identity',
+      '让鼠标和键盘自然跨越两台电脑':'Move the mouse and keyboard naturally between computers','让鼠标和键盘自然跨越多台电脑':'Move the mouse and keyboard naturally across your computers','立即切回本机':'Return to this PC','恢复跨屏控制':'Resume cross-screen control','暂时锁定在本机':'Temporarily lock to this PC','开启跨屏控制':'Enable cross-screen control','屏幕布局':'Screen layout','把已配对设备拖到本机四周':'Drag a paired device around this PC','已配对设备（可拖拽）':'Paired devices (draggable)','暂无已配对设备':'No paired devices','在线设备可直接拖动；离线历史设备上线后即可切换并布局。':'Online devices can be dragged now. Offline history devices become available when they reconnect.','拖到此处':'Drop here','已连接从机':'Connected peer','应用后会增加布局修订号，并通过已配对的双向 TLS 通道同步到对端':'Applying a layout increments its revision and syncs it over the paired mutual TLS channel.','正在应用布局…':'Applying layout…','正在建立连接并同步配置，请稍候':'Connecting and syncing settings. Please wait.','应用中':'Applying','应用布局超时，请重试':'Applying the layout timed out. Please try again.','边界行为':'Edge behavior','控制鼠标跨越屏幕边缘时的触发规则':'Control how the pointer crosses screen edges','使用自定义边界范围':'Use custom boundary ranges','关闭后临时回退到旧版固定方向；已绘制边界不会删除':'Turn off to temporarily use the legacy fixed direction; drawn ranges are preserved','屏幕四角防误触':'Protect screen corners','避免鼠标从屏幕角落意外跨越':'Prevent accidental crossing from screen corners','四角保护范围':'Corner guard size','拖动范围 0–512 像素':'Range 0–512 pixels','跨越前需要二次顶边':'Require a second edge push','鼠标需要连续两次抵达屏幕边缘才会跨越':'Cross only after the pointer reaches the screen edge twice','全屏应用运行时暂停':'Pause while a full-screen app is running','检测到全屏应用时临时暂停跨屏功能':'Pause cross-screen control while a full-screen app is detected','权限与兼容性':'Permissions & compatibility','管理员权限':'Administrator','普通权限':'Standard user','当前进程权限：管理员权限':'Current process privilege: Administrator','当前进程权限：普通权限':'Current process privilege: Standard user','当前后台实例已提权':'The current background instance is elevated','兼容性选项不会提升已经运行的旧实例':'Compatibility settings do not elevate an already-running instance','已以管理员身份运行':'Running as administrator','替换为管理员实例':'Replace with administrator instance','以管理员身份重启':'Restart as administrator','普通权限无法控制管理员窗口':'Standard-user mode cannot control elevated windows','管理员权限仍无法控制 UAC 安全桌面、登录界面或 Ctrl+Alt+Del':'Administrator mode still cannot control the UAC secure desktop, sign-in screen or Ctrl+Alt+Del','游戏、反作弊程序、Raw Input、独占全屏和远程桌面不在兼容优化范围':'Games, anti-cheat, Raw Input, exclusive full-screen and Remote Desktop are outside the compatibility scope','查看完整兼容性说明':'View full compatibility details','上方':'Top','下方':'Bottom','左侧':'Left','右侧':'Right',
+      '在已配对电脑之间同步常用剪贴板内容':'Sync common clipboard content between paired computers','开启共享剪贴板':'Enable shared clipboard','复制后自动发送到当前已配对设备':'Send copied content automatically to the active paired device','支持的内容':'Supported content','纯文字':'Plain text','Unicode 文本':'Unicode text','网页与富文本':'Web and rich text','截图与图片':'Screenshots and images','随总开关启用':'Enabled with the master switch','最近一次同步':'Latest sync','方向':'Direction','格式':'Formats','大小':'Size','状态':'Status','同步完成':'Sync complete','等待新的复制内容':'Waiting for copied content','内容仅通过已配对设备之间的局域网加密连接传输':'Content travels only over encrypted LAN connections between paired devices','文件和文件夹':'Files and folders','由文件剪贴板通道处理；在另一台电脑的资源管理器中直接粘贴':'Handled by the file clipboard; paste directly in File Explorer on the other PC','前往传输中心':'Go to transfer center',
+      '查看状态并控制正在进行的文件传输':'View and control file transfers','当前没有传输任务':'No active transfer tasks','打开独立传输中心':'Open transfer window','关闭窗口不会暂停或取消传输':'Closing the window does not pause or cancel transfers','当前任务':'Current tasks','全部暂停':'Pause all','全部继续':'Resume all','全部取消':'Cancel all','窗口保持可用；收到任务后可以随时打开查看。':'The window stays available and can be opened when a task arrives.','待确认的文件剪贴板':'File clipboard awaiting confirmation','收到待确认的远端文件清单':'A remote file manifest is awaiting confirmation','没有待确认的文件剪贴板':'No file clipboard awaiting confirmation','接收待确认内容':'Accept pending content','窗口与历史记录':'Window & history','收到新传输时自动弹出窗口':'Open the window automatically for new transfers','历史记录保留':'History retention','历史记录行高':'History row height','完整任务表与详情位于独立窗口':'The full task table and details remain in the transfer window','查看历史记录':'View history','暂停':'Pause','取消':'Cancel','查看详情':'View details','减小':'Decrease','增大':'Increase',
+      '为特殊局域网环境手动调整当前设备的地址':'Adjust addresses manually for unusual LAN environments','自动发现':'Automatic discovery','运行中':'Running','不可用':'Unavailable','当前地址由局域网发现自动维护':'The current address is maintained by LAN discovery','当前路由正常':'Current route is healthy','当前路由存在冲突':'Current route has a conflict','VPN、多网卡或特殊路由下可在下方手动修改':'Edit manually below for VPN, multi-adapter or unusual routing setups','活动连接':'Active connection','活动目标设备':'Active target device','本机服务地址':'Local service address','对端服务地址':'Peer service address','仅允许回环地址或专用局域网地址，端口不能为 0':'Only loopback or private LAN addresses are allowed; the port cannot be 0','自动接收文件清单':'Automatically accept file manifests','收到该设备的文件清单后，自动替换本机文件剪贴板':'Replace the local file clipboard automatically when this device sends a manifest','请检查地址格式':'Check the address format','地址有效 · 两台设备位于同一局域网路径':'Valid addresses · both devices are on the same LAN path','保存并应用':'Save & apply','放弃更改':'Discard changes','适用场景':'When to use this','VPN 改变了默认局域网路由':'A VPN changed the default LAN route','电脑同时连接多个专用网络':'The PC is connected to multiple private networks','虚拟网卡占用了对端地址':'A virtual adapter owns the peer address','检测到地址冲突时，Pierdesk 会保留原配置并暂停该路径；冲突解除后自动恢复。':'If an address conflict is detected, Pierdesk preserves the configuration and pauses that path until it is healthy again.','每次只能选择一个活动目标设备。':'Only one target device can be active at a time.',
+      '管理启动方式、后台运行与诊断':'Manage startup, background operation and diagnostics','界面语言':'Display language','首次安装默认使用 English，可随时切换为简体中文':'New installations default to English. You can switch to Simplified Chinese at any time.','界面字体大小':'Interface text size','调整设置中心的文字与控件比例':'Scale text and controls throughout Settings','历史记录保留数量':'History retention count','当前用户登录后自动启动；管理员模式使用登录计划任务':'Start after sign-in; administrator mode uses a logon task','启动配置需要修复：请以管理员身份重新开启此选项':'Startup needs repair: reopen as administrator and enable this option again','后台运行':'Background operation','Pierdesk 正常驻留在系统托盘；关闭设置窗口不会退出程序':'Pierdesk stays in the system tray; closing Settings does not quit the app','正在运行':'Running','关闭设置窗口':'Close Settings','系统托盘图标保持运行':'System tray icon stays active','剪贴板与跨屏服务继续工作':'Clipboard and cross-screen services continue','诊断':'Diagnostics','诊断日志':'Diagnostic log','记录设备发现、连接、剪贴板与传输状态，不写入配对密钥和传输凭据':'Records discovery, connection, clipboard and transfer state without pairing keys or transfer credentials','退出程序':'Quit application','退出 Pierdesk':'Quit Pierdesk','停止跨屏控制、剪贴板同步和正在运行的传输服务':'Stop cross-screen control, clipboard sync and active transfer services','退出前会安全释放跨屏输入状态':'Cross-screen input state is released safely before exit',
+      '本机边界':'Local boundaries','边界地图只描述从本机屏幕离开的入口，不是全局物理布局':'The boundary map describes exits from this screen, not a global physical layout','本机主屏幕':'Local primary screen','相邻设备':'Adjacent devices','最多 5 台远端设备；背景色与边界线对应':'Up to 5 remote devices; card colors match boundary lines','未分配边界':'No boundary assigned','拖到左侧屏幕边缘添加':'Drag to the screen edge on the left to add','查看边界':'View boundary','还没有边界范围。把右侧设备拖到屏幕边缘开始。':'No boundary ranges yet. Drag a device from the right to a screen edge.','拖动右侧设备卡片可移动其边界；按住 Ctrl 拖动设备卡片可为同一设备追加额外边界。':'Drag a device card on the right to move its boundary; hold Ctrl while dragging the card to add another boundary for the same device.','共享圆点会同时改变相邻两台设备的范围；删除边界不会取消配对或 SSH。':'A shared handle resizes both adjacent ranges. Deleting a boundary does not unpair or revoke SSH.','新增范围与该设备已有边界重叠，请换到空白范围。':'The new range overlaps this device’s existing boundary. Choose an empty range.','删除所选边界':'Delete selected boundary','恢复已保存':'Restore saved map','边界范围冲突':'Boundary range conflict','交换完整边界':'Swap complete boundaries','替换目标范围':'Replace target range','配置损坏，已停止载入':'The configuration is corrupt and was not loaded','已按当前分辨率安全裁剪':'Safely clipped for the current resolution','正在保存':'Saving','四角保护范围':'Corner guard area','SSH、配对、剪贴板和普通文件功能独立于边界配置。离线设备的边界会保留，但不可穿越。':'SSH, pairing, clipboard and ordinary file features are independent of boundaries. Offline boundaries are retained but cannot be crossed.','取消':'Cancel',
+      '已配对设备':'Paired devices','屏幕信息已同步':'Screen information synced','屏幕信息同步中':'Syncing screen information','等待设备上线后同步屏幕信息':'Screen information will sync when the device comes online','当前运行设置':'Current runtime settings','边界草稿应用前，这些设置继续控制实际跨屏行为':'These settings continue to control cross-screen behavior until the boundary draft is applied','使用已应用的边界范围':'Use applied boundary ranges','关闭后临时使用固定方向；正在编辑的草稿会保留':'When off, the fixed direction is used temporarily and the draft remains saved','仅影响目前运行中的边界；新草稿会在最终应用时编译 32 像素保护':'Affects the currently running boundaries. New drafts compile 32-pixel guards during final apply',
+      '跨屏边界':'Cross-screen boundaries','在本机设置通向多台设备的屏幕位置、出口与对端入口。':'Arrange screens and configure exits and peer entries for your devices.','高级设置':'Advanced settings','当前运行设置会继续控制实际跨屏行为。':'Current runtime settings continue to control actual cross-screen behavior.','自动投影':'Automatic projection','摆放屏幕，生成建议范围':'Arrange screens and generate suggested ranges','双端调整':'Paired adjustment','检查出口、入口与方向':'Review exits, entries, and direction','查看当前生效状态':'View current activation status','双方确认后运行时生效':'Takes effect after both devices confirm','全局空间布局':'Global spatial layout','尺寸和方向自动同步；拖动每块屏幕摆放实际位置，投影会随位置更新。':'Sizes and orientations sync automatically. Drag each screen into its physical position and projections update with it.','尺寸和方向自动同步；拖动每块屏幕摆放实际位置，投影会随位置实时更新。':'Sizes and orientations sync automatically. Drag each screen into its physical position and projections update live.','保护角仅作标记 · 不参与投影':'Corner guards are markers only · excluded from projection','拖动屏幕调整物理位置':'Drag the screen to adjust its physical position','校正所选屏幕尺寸':'Correct selected screen dimensions','选择设备查看投影；屏幕信息同步后可直接加入布局。':'Select a device to inspect its projection. Add it after its screen information syncs.','等待屏幕信息':'Waiting for screen information','旋转':'Rotate','缩小':'Zoom out','放大':'Zoom in','可拖动空白处平移，滚轮缩放':'drag empty space to pan, and use the wheel to zoom','在本机完整屏幕周长上调整出口；跨角片段始终属于同一条逻辑边界。':'Adjust exits around the full perimeter of this screen. Cross-corner pieces remain one logical boundary.','在本机完整屏幕周长上调整出口；屏幕内部用于整理设备连接关系。':'Adjust exits around the full perimeter. Use the screen interior to arrange device connections.','本机逻辑边界':'Local logical boundaries','请先生成边界草稿':'Generate a boundary draft first','生成草稿后，在这里检查本机出口与对端入口的对应关系。':'After generating a draft, review the mapping between the local exit and peer entry here.','选择设备查看其边界；拖到屏幕边缘可移动，按住 Ctrl 拖动可追加独立边界。':'Select a device to inspect its boundaries. Drag it to an edge to move a boundary, or hold Ctrl while dragging to add an independent boundary.','SSH、配对、剪贴板和普通文件功能独立于边界配置。':'SSH, pairing, clipboard, and regular file features are independent of boundary configuration.','虚线是空间布局生成的参考。四角斜纹只作提示；32 像素保护区仅在最终应用时编译。':'Dashed lines are generated from the spatial layout. Hatched corners are guides only, and the 32-pixel guards are compiled only during final apply.','人工边界草稿已保存':'Boundary draft saved.',
+      '设备连接关系':'Device connections','连接线表示本机已经建立的双向信任，不代表物理屏幕位置或消息转发路线。':'Lines show two-way trust with this PC. They do not represent physical screen positions or message routes.','排布':'Arrangement','弹性整理':'Elastic arrange','自由摆放':'Free placement','弹性':'Elastic','自由':'Free','重置':'Reset','重置排布':'Reset arrangement','可拖动的设备连接关系图':'Draggable device connection graph','节点位置只保存在这台电脑上。拖动节点只是整理视图，不会改变空间布局、边界或控制路线。':'Node positions are stored only on this PC. Dragging a node only arranges this view; it does not change the spatial layout, boundaries, or control routes.','弹性整理时，连接线会像弹簧一样牵动相邻节点并自动稳定。节点位置只保存在本机，不代表空间布局、边界或控制路线。':'In elastic arrange mode, links pull adjacent nodes like springs until the graph settles. Positions are stored only on this device and do not represent the spatial layout, boundaries, or control routes.','自由摆放采用锚定弹性：节点停在放下的位置，相邻节点被轻微带动后回弹。节点位置只保存在本机，不代表空间布局、边界或控制路线。':'Free placement uses anchored springs: the dragged node stays where you drop it, while adjacent nodes move slightly and spring back. Positions are stored only on this device and do not represent the spatial layout, boundaries, or control routes.',
+      '空间布局':'Spatial layout','屏幕按物理毫米比例绘制；拖动屏幕更新投影，拖动空白处平移画布。':'Screens are drawn to physical millimeter scale. Drag a screen to update projections, or drag empty space to pan.','适应全部':'Fit all','屏幕空间布局与自动投影':'Screen layout and automatic projections','生成边界草稿':'Generate boundary draft','屏幕信息':'Screen information','在线对端通过加密设备连接自动同步像素和物理尺寸；加入后可在这里校正系统识别误差。':'Online peers automatically sync pixel and physical dimensions over an encrypted device connection. Correct OS detection errors here after adding a screen.','像素宽':'Pixel width','像素高':'Pixel height','物理宽 mm':'Physical width (mm)','物理高 mm':'Physical height (mm)','加入空间布局':'Add to spatial layout','等待自动同步':'Waiting for automatic sync','前往切换当前设备':'Switch current device','保存校正':'Save correction','旋转 90°':'Rotate 90°','移出布局':'Remove from layout','已配对设备都在空间布局中':'All paired devices are in the spatial layout','加入远端屏幕后才会生成投影':'Add a remote screen to generate projections','黄色为近屏优先冲突区':'yellow marks near-screen priority conflicts','正在通过加密设备连接获取屏幕信息…':'Fetching screen information over an encrypted device connection…','设备上线后自动获取屏幕信息':'Screen information is fetched automatically when the device comes online','对端系统未报告物理尺寸':'The peer system did not report physical dimensions','手动补充':'Enter manually','收起':'Collapse','保存并加入':'Save and add','例如 598':'e.g. 598','例如 336':'e.g. 336','操作未完成：请填写有效的物理毫米尺寸':'Could not complete: enter valid physical dimensions in millimeters',
+      '人工逻辑草稿':'Manual logical draft','拖动边界主体可沿完整周长跨角移动；选中后拖动圆点调整端点。':'Drag a boundary along the full perimeter and across corners. Select it and drag a round handle to adjust an endpoint.','隐藏自动底稿':'Hide automatic draft','显示自动底稿':'Show automatic draft','恢复自动底稿':'Restore automatic draft','Ctrl+Z 撤销':'Ctrl+Z Undo','Delete 删除':'Delete','调整起点':'Adjust start','调整终点':'Adjust end','完整周长':'Full perimeter','虚线是当前空间布局的自动参考。四角斜纹只作提示；32 像素保护区仅在第三步编译。':'Dashed lines show the automatic reference for the current spatial layout. Hatched corners are visual guides; the 32-pixel guards are compiled only in step 3.','拖设备到屏幕边缘：移动现有边界；按住 Ctrl 拖动：追加独立 boundaryId。':'Drag a device to the screen edge to move its boundary. Hold Ctrl while dragging to add an independent boundaryId.','逻辑边界':'Logical boundaries','点击任一片段都会选中整条跨角边界。':'Click any segment to select the entire cross-corner boundary.','空间布局中还没有远端屏幕':'No remote screens are in the spatial layout','自动投影中还没有远端屏幕':'No remote screens are in the automatic projection','尚未生成边界草稿':'No boundary draft has been generated',
+      '双端入口映射':'Paired portal mapping','预览位置 t':'Preview position t','对端逆时针':'Peer counterclockwise','对端顺时针':'Peer clockwise','缩短':'Shorten','加长':'Lengthen','翻转方向':'Reverse direction','本机已确认':'Confirmed on this PC','确认本机这一版':'Confirm this revision here','移动本机出口不会带动对端入口；系统只会递增映射修订并重新计算累计物理长度 t。对端同步并确认同一修订后才可应用。':'Moving the local exit does not move the peer entry. The mapping revision increments and cumulative physical-length t is recalculated. Apply is available after the peer syncs and confirms the same revision.','等待本机确认':'Waiting for local confirmation','等待对端确认':'Waiting for peer confirmation','双方已确认':'Confirmed by both devices','对端离线':'Peer offline',
+      '应用最终边界':'Apply final boundaries','所有映射已确认，可以应用最终边界。':'All mappings are confirmed and ready to apply.','最终应用将在所有设备支持双端确认后开放；当前草稿可以继续保存和复查。':'Final apply becomes available when every device supports paired confirmation. The current draft can still be saved and reviewed.','先从空间布局生成至少一条边界草稿。':'Generate at least one boundary from the spatial layout first.','摆放屏幕并生成自动投影':'Arrange screens and generate automatic projections','人工草稿':'Manual draft','调整连续边界与双端入口':'Adjust continuous boundaries and paired portals','最终应用':'Final apply','确认后才编译四角保护':'Corner guards are compiled only after confirmation','连接关系':'Connections','工作区异常':'Workspace error','草稿未应用':'Draft not applied','已保存快照':'Saved snapshot',
+      '保存失败，已恢复后台中的上一份草稿。':'Save failed. The previous backend draft was restored.','请先补全工作区内每台屏幕的像素与毫米尺寸':'Complete the pixel and millimeter dimensions for every screen in the workspace','一个工作区最多包含本机和五台远端设备':'A workspace can contain this PC and up to five remote devices','逻辑边界 ID 重复':'A logical boundary ID is duplicated','双端入口不能为空':'Paired portals cannot be empty','本机出口不能互相重叠；已保留拖动前的位置':'Local exits cannot overlap. The position from before the drag was kept.','同一对端的入口不能互相重叠；已保留拖动前的位置':'Entries on the same peer cannot overlap. The position from before the drag was kept.','正在保存人工边界草稿…':'Saving the manual boundary draft…','屏幕信息尚未自动同步；设备保持在线后会通过跨屏通道自动接收':'Screen information has not synced yet. It will arrive through the cross-screen channel while the device stays online.','屏幕已从空间布局移除；设备配对和 SSH 保持不变。':'The screen was removed from the spatial layout. Pairing and SSH are unchanged.','对端入口已调整；本机出口保持原位，当前修订等待确认。':'The peer entry was adjusted. The local exit stayed in place, and this revision awaits confirmation.','本机已确认这版入口；仍需对端确认同一修订。':'This PC confirmed the portal. The peer must still confirm the same revision.','整条逻辑边界已删除；配对、SSH 和对端入口配置保持独立。':'The entire logical boundary was deleted. Pairing, SSH, and peer portal settings remain independent.','已按整条逻辑边界撤销上一步。':'Undid the previous step for the entire logical boundary.','空间位置已保存；自动投影已更新，人工草稿保持不变。':'The spatial position was saved and automatic projections updated. The manual draft is unchanged.','共享分割点已调整；压缩到零的逻辑边界会整体移除。':'The shared split point was adjusted. A logical boundary compressed to zero is removed as a whole.','本机出口已调整；对端入口保持原位并等待确认。':'The local exit was adjusted. The peer entry stayed in place and awaits confirmation.','已采用并确认对端发送的布局':'The peer layout was accepted and confirmed here.',
+      '上边':'Top edge','右边':'Right edge','下边':'Bottom edge','左边':'Left edge','出口':'Exit','入口':'Entry','远端设备':'Remote device','未知设备':'Unknown device','设备':'Device',
+      '开源、免费，也能长久':'Open, free, and sustainable','感谢你使用 Pierdesk':'Thank you for using Pierdesk','Pierdesk 会继续免费、开源':'Pierdesk will remain free and open source','如果 Pierdesk 帮你省下了时间，欢迎自愿请作者喝杯咖啡。你的支持会用于持续开发、测试设备和发布维护。':'If Pierdesk has saved you time, you are welcome to buy the author a coffee. Your voluntary support helps fund ongoing development, test devices, and release maintenance.','核心功能始终免费':'Core features stay free','不解锁付费权益':'No paid features to unlock','不记录支持行为':'No support activity is tracked','选择一种方式':'Choose a way to support','请使用手机扫码，金额完全随意。':'Scan with your phone. The amount is entirely up to you.','微信支付':'WeChat Pay','微信支付 · 感谢支持':'WeChat Pay · Thank you for your support','打开微信扫一扫':'Open WeChat and scan','放大二维码':'Enlarge QR code','支付宝':'Alipay','支付宝 · 感谢支持':'Alipay · Thank you for your support','打开支付宝扫一扫':'Open Alipay and scan','支付与隐私':'Payments and privacy','付款由微信或支付宝直接处理。Pierdesk 不接收付款状态、不保存支付信息，也不会因为是否支持而改变任何功能。':'Payments are handled directly by WeChat or Alipay. Pierdesk receives no payment status, stores no payment information, and never changes features based on whether you support it.','不方便扫码？':'Not ready to scan?','给项目点 Star、反馈问题、分享给需要多台 Windows 电脑协作的人，同样是非常实在的支持。':'Starring the project, reporting issues, or sharing it with people who work across multiple Windows PCs are equally meaningful ways to help.','查看开源项目':'View the open-source project','感谢支持':'Thank you for your support','使用手机扫描下方二维码；金额由你决定。':'Scan the QR code below with your phone. You decide the amount.','关闭':'Close','支持完全自愿':'Support is completely voluntary','Pierdesk 的所有核心功能都会保持免费开放。':'All core Pierdesk features will remain freely available.','前往支持作者':'Support the author',
+      '暂未发现可配对的新设备。请确认另一台电脑已打开 Pierdesk 并位于同一局域网。':'No new devices are available to pair. Make sure Pierdesk is open on another PC on the same LAN.','范围 1–500':'Range 1–500','条':'items','无':'None','发送':'Sent','接收':'Received','文字':'Text','文字 + HTML':'Text + HTML','正在接收':'Receiving','正在发送':'Sending','等待粘贴':'Waiting to paste','传输中':'Transferring','已暂停':'Paused','已取消':'Cancelled','已完成':'Completed','失败':'Failed','等待启动':'Waiting to start','正在控制对端':'Controlling peer','正由对端控制':'Controlled by peer','正在重连':'Reconnecting','全屏应用暂停中':'Paused for full-screen app','已锁定本机':'Locked to this PC','已停止':'Stopped','微':'W','支':'A','微信支付 / WeChat Pay 二维码':'WeChat Pay QR code','支付宝 / Alipay 二维码':'Alipay QR code','Pierdesk 图标':'Pierdesk icon',
+      '跨屏控制兼容性说明':'Cross-screen control compatibility','权限边界':'Privilege boundaries','普通权限运行时不能控制管理员权限窗口。以管理员身份运行可覆盖大多数桌面应用，但 Windows 的 UAC 安全桌面、登录界面与 Ctrl+Alt+Del 始终不会被接管。':'Standard-user mode cannot control elevated windows. Running as administrator covers most desktop apps, but Pierdesk never takes over the Windows UAC secure desktop, sign-in screen, or Ctrl+Alt+Del.','应用兼容性':'Application compatibility','跨屏控制面向常规 Windows 桌面应用。游戏、反作弊程序、Raw Input、独占全屏、远程桌面或其他主动拦截输入的软件不在兼容优化范围内。':'Cross-screen control is designed for standard Windows desktop apps. Games, anti-cheat software, Raw Input, exclusive full-screen, Remote Desktop, and other software that intercepts input are outside the compatibility scope.','连接与文件':'Connections and files','屏幕布局通过已配对的双向 TLS 通道自动同步；四角保护范围仅影响本机越界。跨设备文件移动继续使用 Pierdesk 文件剪贴板与独立传输中心。':'Screen layouts sync automatically over the paired mutual TLS channel. Corner protection affects only crossings from this PC. Cross-device file transfers continue to use the Pierdesk file clipboard and separate transfer window.','知道了':'Got it','返回':'Back',
+      '请先在远程工作中撤销该设备的 SSH 授权。取消配对后需要重新核对验证码才能恢复连接。':'Revoke this device’s SSH authorization in Remote work first. After unpairing, you must verify the code again to reconnect.','取消全部传输？':'Cancel all transfers?','所有正在等待、接收或暂停的任务都会被取消。':'All waiting, active, and paused tasks will be cancelled.','退出 Pierdesk？':'Quit Pierdesk?','跨屏控制、剪贴板同步和传输服务将停止。SSH 服务和已有授权会保留。':'Cross-screen control, clipboard sync, and transfer services will stop. SSH service and existing authorizations will be retained.','已批准，正在等待另一台设备确认…':'Approved. Waiting for the other device to confirm…','正在安全拒绝配对请求…':'Securely rejecting the pairing request…','已拒绝配对请求':'Pairing request rejected',
+      '关于 Pierdesk':'About Pierdesk','设备各自运行，工作自然衔接。':'Independent devices, one continuous workflow.','作者：micky-meecky':'Author: micky-meecky','跨设备，仍像在本机':'Across devices, still feels local','版本与开源':'Version & open source','版本':'Version','支持系统':'Supported systems','许可证':'License','源代码':'Source code','文件与输入只在已配对设备之间通过局域网传输':'Files and input travel only between paired devices over the LAN','Pierdesk 把已配对的 Windows 电脑连接成一个连贯工作空间：鼠标越过屏幕边界，键盘随当前设备切换，剪贴板和文件也能继续流转。':'Pierdesk connects paired Windows PCs into one continuous workspace: the pointer crosses screen edges, the keyboard follows the active device, and clipboard content and files keep moving with you.','它不投屏、不接管远程桌面。每台电脑保持独立运行，只通过已配对的局域网加密连接同步必要的输入与内容。':'It does not cast screens or take over Remote Desktop. Each PC runs independently and shares only the required input and content over an encrypted paired LAN connection.','多设备配对和图形化屏幕布局会保留每台电脑的可信身份与位置，重新上线后无需重复配置。':'Multi-device pairing and the visual screen layout preserve each computer’s trusted identity and position, so reconnecting does not require repeated setup.','“ 跨过屏幕边界，继续手头的工作。 ”':'“ Cross the screen edge and keep working. ”'
+    }));
+    for (const [zh, value] of Object.entries({
+      '设备连接':'Device connections',
+      '按电脑对单独开启或关闭跨屏控制。不会修改边界设置，也不会解除配对。':'Turn cross-screen control on or off for one pair of computers. Boundary settings and pairing are not changed.',
+      '对端离线':'Peer offline', '跨屏已开启':'Cross-screen on', '跨屏已停用':'Cross-screen off',
+      '请先开启跨屏控制':'Turn on cross-screen control first', '两台电脑需同时在线才能切换':'Both computers must be online to switch',
+      '与此设备的跨屏控制：':'Cross-screen control with '
+    })) en.set(zh, value);
+
+    function translateKnownText(text) {
+      return en.get(text) || text;
+    }
+
+    function runtimeErrorText(value) {
+      const text = String(value || '');
+      if (!text || currentModel().language !== 'en') return text;
+      const hasHan = candidate => /\p{Script=Han}/u.test(candidate);
+      const summarized = (summary, source = text) => {
+        const detail = source.includes('：') ? source.slice(source.indexOf('：') + 1).trim() : '';
+        return detail && !hasHan(detail) ? `${summary}: ${detail}` : `${summary}. Open the diagnostic log for details.`;
+      };
+      if (text.includes('连接对端超时')) return 'Cross-screen connection timed out. Make sure Pierdesk is running on the other computer, both computers can reach each other on the LAN, and private-network access is allowed in Windows Firewall.';
+      if (text.includes('文件剪贴板未送达') && text.includes('双向文件控制通道')) return 'The file clipboard was not delivered because the bidirectional file-control channel could not be established. Make sure both computers are running the same current Pierdesk version, then copy the file again after the network recovers. Cross-screen control is unaffected.';
+      if (text.includes('已收到对端文件清单，但反向文件数据隧道尚未就绪')) return 'The remote file list was received, but the reverse file-data tunnel is not ready. Pierdesk will retain the list and keep restoring the tunnel. Cross-screen control is unaffected.';
+      if (text.includes('已收到对端文件清单，但无法连接对端文件数据入口')) return 'The remote file list was received, but Pierdesk could not connect to the peer file-data endpoint. Make sure both computers are running the same current Pierdesk version. The list remains available to receive, and cross-screen control is unaffected.';
+      const prefix = [
+        ['后台服务已停止：', 'The background service stopped'],
+        ['本机文件清单发布失败：', 'Could not publish the local file list'],
+        ['本机文件剪贴板未发送：', 'The local file clipboard was not sent'],
+        ['读取本机剪贴板失败：', 'Could not read the local clipboard'],
+        ['无法创建共享剪贴板事件：', 'Could not create the shared-clipboard event'],
+        ['共享剪贴板未送达：', 'The shared clipboard was not delivered'],
+        ['读取本机共享剪贴板失败：', 'Could not read the local shared clipboard'],
+        ['安装待接收共享剪贴板失败：', 'Could not prepare the incoming shared clipboard'],
+        ['完成接收共享剪贴板失败：', 'Could not finish receiving the shared clipboard'],
+        ['传输控制失败：', 'Transfer control failed'],
+        ['连接设置不可用：', 'Connection settings are unavailable'],
+        ['网络路径暂不可用：', 'The network path is temporarily unavailable'],
+        ['后台服务启动失败：', 'The background service could not start'],
+        ['跨屏控制设置不可用：', 'Cross-screen settings are unavailable'],
+        ['跨屏控制无法读取已配对设备设置：', 'Cross-screen control could not read paired-device settings'],
+        ['跨屏控制网络路径暂不可用：', 'The cross-screen network path is temporarily unavailable'],
+        ['跨屏控制启动失败：', 'Cross-screen control could not start'],
+      ].find(([candidate]) => text.startsWith(candidate));
+      if (prefix) return summarized(prefix[1]);
+      if (text === '共享剪贴板在读取期间失效或被替换') return 'The shared clipboard changed while it was being read. Copy the content again.';
+      if (text === '收到非活动设备的 Offer，已拒绝') return 'An offer from an inactive device was rejected.';
+      if (text.includes('同时活动的发送文件任务过多')) return 'Too many outgoing file transfers are active. Finish some tasks before starting another.';
+      if (text.includes('同时活动的接收文件任务过多')) return 'Too many incoming file transfers are active. Finish or cancel one task before starting another.';
+      return hasHan(text) ? 'An internal operation failed. Open the diagnostic log for the complete error.' : text;
+    }
+
+    function pairingMessageText(value) {
+      const text = String(value || '');
+      if (!text || currentModel().language !== 'en') return text;
+      const translated = translateText(text);
+      if (!/\p{Script=Han}/u.test(translated)) return translated;
+      if (text.startsWith('配对未完成：')) {
+        return `Pairing did not complete: ${runtimeErrorText(text.slice('配对未完成：'.length).trim())}`;
+      }
+      return 'The pairing status could not be displayed. Open the diagnostic log for details.';
+    }
+
+    function translateText(text) {
+      if (en.has(text)) return en.get(text);
+      const translated = text
+        .replace(/^已连接 · /, 'Connected · ')
+        .replace(/^版本 /, 'Version ')
+        .replace(/^延迟 /, 'Latency ')
+        .replace(/^最低延迟 /, 'Lowest latency ')
+        .replace(/^监听 /, 'Listening on ')
+        .replace(/^发现 (\d+) 台可信设备$/, 'Found $1 trusted device(s)')
+        .replace(/^发现 (\d+) 台设备$/, 'Found $1 device(s)')
+        .replace(/^(\d+) 个任务$/, '$1 task(s)')
+        .replace(/^(\d+) 个任务正在传输$/, '$1 task(s) transferring')
+        .replace(/^(\d+) 个文件 · (.+)$/, '$1 file(s) · $2')
+        .replace(/^(\d+) 条$/, '$1 records')
+        .replace(/^(\d+) 台设备 · (\d+) 条本机连接$/, '$1 devices · $2 local connections')
+        .replace(/^(\d+) 台设备在线$/, '$1 device(s) online')
+        .replace(/^(\d+) 台跨屏设备在线$/, '$1 cross-screen device(s) online')
+        .replace(/^(\d+) \/ (\d+) 台设备已连接$/, '$1 / $2 device(s) connected')
+        .replace(/^(.+) · (\d+) 条边界$/, (_, placement, count) => `${translateKnownText(placement)} · ${count} boundary(ies)`)
+        .replace(/^(\d+) 台可信设备 · 可同时保留并加入跨屏工作区$/, '$1 trusted device(s) · available together in the cross-screen workspace')
+        .replace(/^屏幕信息已同步 · (.+)$/, 'Screen information synced · $1')
+        .replace(/^＋ 添加设备 · (\d+)\/6$/, '+ Add device · $1/6')
+        .replace(/^(\d+) 台远端设备得到自动投影/, '$1 remote device(s) received automatic projections')
+        .replace(/可拖动空白处平移，滚轮缩放/g, 'drag empty space to pan, and use the wheel to zoom')
+        .replace(/^当前方向 (\d+)°$/, 'Current orientation: $1°')
+        .replace(/^(.+) · 当前方向 (\d+)°$/, '$1 · orientation $2°')
+        .replace(/^(.+) · 修订 (\d+)$/, '$1 · revision $2')
+        .replace(/ · 修订 (\d+) ·/, ' · revision $1 ·')
+        .replace(/^(\d+) 条逻辑边界 · /, '$1 logical boundary(ies) · ')
+        .replace(/^(.+) · 出口$/, '$1 · exit')
+        .replace(/^(.+) · 入口$/, '$1 · entry')
+        .replace(/^(\d+) 条边界的对端离线，不能应用。$/, '$1 boundary peer(s) are offline, so apply is blocked.')
+        .replace(/^(\d+) 对双端入口等待双方确认。$/, '$1 paired portal(s) await confirmation from both devices.')
+        .replace(/^已生成 (\d+) 对双端入口；对端入口保持独立并等待确认。$/, 'Generated $1 paired portal(s). Peer entries remain independent and await confirmation.')
+        .replace(/^(.+) 已加入空间布局。$/, '$1 was added to the spatial layout.')
+        .replace(/^(.+) 已旋转 90°；相关映射等待重新确认。$/, '$1 was rotated 90°. Related mappings await confirmation again.')
+        .replace(/^(.+) 的屏幕尺寸已保存；相关映射等待重新确认。$/, '$1 screen dimensions were saved. Related mappings await confirmation again.')
+        .replace(/^请在两台设备上核对验证码，然后确认是否配对“(.+)”$/, 'Verify the code on both devices, then confirm whether to pair with “$1”')
+        .replace(/^已与“(.+)”安全配对$/, 'Securely paired with “$1”')
+        .replace(/^已拒绝“(.+)”的配对请求$/, 'Rejected the pairing request from “$1”')
+        .replace(/^配对未完成：/, 'Pairing did not complete: ')
+        .replace(/^取消配对“(.+)”？$/, 'Unpair “$1”?')
+        .replace(/^在线 · /, 'Online · ').replace(/^离线 · /, 'Offline · ')
+        .replace(/^正在调整 (.+)$/, 'Editing $1')
+        .replace(/^正在调整 · (\d+) 条逻辑边界 · (在线|离线)$/, 'Editing · $1 logical boundary(ies) · $2')
+        .replace(/已收到像素尺寸/g, 'Pixel dimensions received').replace(/像素尺寸待连接后同步/g, 'Pixel dimensions will sync after connection')
+        .replace(/ · 在线$/, ' · online').replace(/ · 离线$/, ' · offline')
+        .replace(/ · 黄色为近屏优先冲突区$/, ' · yellow marks near-screen priority conflicts')
+        .replace(/ · 完整周长$/, ' · full perimeter')
+        .replace(/^对端在/, 'Peer is on the ')
+        .replace(/^当前权限：/, 'Current privilege: ')
+        .replace(/(\d+) 个文件夹/g, '$1 folder(s)')
+        .replace(/^(\d+) 像素$/, '$1 px')
+        .replace(/(^| → )本机(?=$| →)/g, '$1Local device')
+        .replace(/^跨屏控制(运行中|等待启动|未开启|正在连接|已连接|正在控制对端|正由对端控制|正在重连|已暂停|全屏应用暂停中|已锁定本机|已停止|失败)$/, (_, status) => `Cross-screen control · ${translateKnownText(status)}`)
+        .replace(/已开启/g, 'Enabled').replace(/已关闭/g, 'Disabled').replace(/未开启/g, 'Disabled').replace(/暂无/g, 'None');
+      return translated.split(' · ').map(translateKnownText).join(' · ');
+    }
+
+    function localizeDocument() {
+      const language = currentModel().language || 'en';
+      document.documentElement.lang = language;
+      document.title = language === 'en' ? 'Pierdesk Settings' : 'Pierdesk 设置';
+      if (language !== 'en') return;
+      const root = document.getElementById('root');
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const raw = node.nodeValue, trimmed = raw.trim();
+        if (!trimmed) continue;
+        const translated = translateText(trimmed);
+        if (translated !== trimmed) node.nodeValue = raw.replace(trimmed, translated);
+      }
+      root.querySelectorAll('[aria-label],[title],[placeholder],[alt]').forEach(node => {
+        for (const attribute of ['aria-label','title','placeholder','alt']) if (node.hasAttribute(attribute)) node.setAttribute(attribute, translateText(node.getAttribute(attribute)));
+      });
+    }
+
+    function shell(pageHtml) {
+      const m = currentModel();
+      const onlinePeerCount = (m.peers || []).filter(peer => peer.online).length;
+      return `<div class="app">
+        <header class="topbar" data-drag-region>
+          <div class="brand"><img src="__PIERDESK_ICON__" alt=""><strong>Pierdesk 设置</strong></div>
+          <div class="top-actions">
+            <button class="appearance-toggle" data-action="toggle-theme" title="切换亮色/暗色模式" aria-label="切换亮色/暗色模式">${svg(m.theme === 'dark' ? 'sun' : 'moon')}<span>${m.theme === 'dark' ? '亮色模式' : '暗色模式'}</span></button>
+            <div class="connection-pill"><span class="dot ${onlinePeerCount ? 'green' : ''}"></span>${onlinePeerCount ? `${onlinePeerCount} 台设备在线` : '尚未连接'}</div>
+            <div class="window-controls">
+              <button class="window-button" data-window="minimize" aria-label="最小化">${svg('minus')}</button>
+              <button class="window-button" data-window="maximize" aria-label="最大化">${svg('square')}</button>
+              <button class="window-button close" data-window="close" aria-label="关闭">${svg('close')}</button>
+            </div>
+          </div>
+        </header>
+        <aside class="sidebar"><nav class="nav" aria-label="设置页面">${visiblePages().map(([key,label,ico]) => `<button class="nav-button ${state.page === key ? 'active' : ''}" data-page="${key}" ${state.page === key ? 'aria-current="page"' : ''}>${svg(ico,'nav-icon')}<span class="nav-label">${label}</span></button>`).join('')}</nav></aside>
+        <main class="content"><section class="page">${sshNotice()}${pageHtml}</section></main>
+      </div>${['top','right','bottom','left','top-left','top-right','bottom-left','bottom-right'].map(edge=>`<div class="resize-handle ${edge.includes('-')?'corner':''}" data-edge="${edge}" aria-hidden="true"></div>`).join('')}${state.modal ? renderModal(state.modal) : ''}`;
+    }
+    function heading(title, subtitle) { return `<div class="page-heading"><h1>${title}</h1><p class="subtitle">${subtitle}</p></div>`; }
+
+    function statusBoundarySummary(model, fingerprint) {
+      const workspace = model.boundaryWorkspaceV3;
+      const layout = (model.boundaryWorkspaceV3Applied ? workspace?.applied?.layout : null) || workspace?.draft;
+      const boundaries = (layout?.boundaries || []).filter(boundary => boundary.peerFingerprint === fingerprint);
+      let position = '';
+      const local = layout?.screens?.find(screen => screen.deviceFingerprint === layout.localFingerprint);
+      const peer = layout?.screens?.find(screen => screen.deviceFingerprint === fingerprint);
+      if (local && peer) {
+        const size = screen => {
+          const rotated = Number(screen.rotationQuarterTurns || 0) % 2 !== 0;
+          return {
+            width: Number(rotated ? screen.physicalHeightMillimeters : screen.physicalWidthMillimeters) || 0,
+            height: Number(rotated ? screen.physicalWidthMillimeters : screen.physicalHeightMillimeters) || 0,
+          };
+        };
+        const localSize = size(local), peerSize = size(peer);
+        const dx = Number(peer.canvasXMillimeters || 0) + peerSize.width / 2 - Number(local.canvasXMillimeters || 0) - localSize.width / 2;
+        const dy = Number(peer.canvasYMillimeters || 0) + peerSize.height / 2 - Number(local.canvasYMillimeters || 0) - localSize.height / 2;
+        position = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? '左侧' : '右侧') : (dy < 0 ? '上方' : '下方');
+      }
+      if (!boundaries.length) {
+        const segments = (model.boundaryMap?.segments || []).filter(segment => segment.peerFingerprint === fingerprint);
+        if (segments.length) {
+          position = placementLabel(({top:'above',bottom:'below',left:'left',right:'right'})[segments[0].edge]);
+          return `${position} · ${segments.length} 条边界`;
+        }
+        return '未加入边界工作区';
+      }
+      return `${position || '已加入布局'} · ${boundaries.length} 条边界`;
+    }
+
+    function statusPeerRows(model) {
+      const links = Array.isArray(model.cross?.connections?.peers) ? model.cross.connections.peers : [];
+      const linksByFingerprint = new Map(links.map(link => [link.fingerprint, link]));
+      const appliedLayout = model.boundaryWorkspaceV3Applied ? model.boundaryWorkspaceV3?.applied?.layout : null;
+      const workspaceIds = new Set((appliedLayout?.boundaries || []).map(boundary => boundary.peerFingerprint));
+      const ids = links.length ? links.map(link => link.fingerprint) : workspaceIds.size ? [...workspaceIds] : (model.peers || []).filter(peer => peer.online || peer.current).map(peer => peer.fingerprint);
+      return [...new Set(ids)].map(fingerprint => {
+        const peer = (model.peers || []).find(candidate => candidate.fingerprint === fingerprint) || { fingerprint, label: fingerprint };
+        const link = linksByFingerprint.get(fingerprint);
+        const online = link ? Boolean(link.online) : Boolean(peer.online);
+        const error = String(link?.lastError || '');
+        const stateLabel = error ? '连接异常' : online ? '已连接' : peer.online ? '正在连接' : '离线';
+        const latency = link?.roundTripMicros !== null && link?.roundTripMicros !== undefined && Number.isFinite(Number(link.roundTripMicros)) ? `${(Number(link.roundTripMicros) / 1000).toFixed(1)} ms` : '等待中';
+        return { peer, link, online, error, stateLabel, latency, boundary:statusBoundarySummary(model, fingerprint) };
+      });
+    }
+
+    const telemetryWindowMs = 90000;
+    const telemetryPalette = ['#5d9df6','#42c79a','#b787f5','#f2a64a','#f16c7f'];
+    function telemetryText(zh, enText) { return currentModel().language === 'en' ? enText : zh; }
+    function recordStatusTelemetry(model, now = Date.now()) {
+      const telemetry = state.telemetry;
+      const connections = Array.isArray(model.cross?.connections?.peers) ? model.cross.connections.peers : [];
+      const peers = model.peers || [];
+      if (!telemetry.lastSampleAt || now - telemetry.lastSampleAt >= 450) {
+        connections.forEach((link, index) => {
+          const fingerprint = String(link.fingerprint || `peer-${index}`);
+          const peer = peers.find(item => item.fingerprint === fingerprint);
+          const series = telemetry.links[fingerprint] || (telemetry.links[fingerprint] = { fingerprint, label: peer?.label || fingerprint, color: telemetryPalette[Object.keys(telemetry.links).length % telemetryPalette.length], samples: [] });
+          series.label = peer?.label || series.label;
+          const hasLatency = link.roundTripMicros !== null && link.roundTripMicros !== undefined;
+          const micros = Number(link.roundTripMicros);
+          series.samples.push({ at: now, value: link.online && hasLatency && Number.isFinite(micros) ? micros / 1000 : null });
+          series.samples = series.samples.filter(sample => sample.at >= now - telemetryWindowMs).slice(-190);
+        });
+        telemetry.lastSampleAt = now;
+      }
+      const rememberEvent = (kind, generation, detail) => {
+        if (!Number.isFinite(generation)) return;
+        const key = kind === 'clipboard' ? 'sharedGeneration' : 'transferGeneration';
+        const previous = telemetry[key];
+        if (previous !== null && generation > previous) telemetry.events.push({ at: now, kind, count: Math.max(1, generation - previous), detail });
+        telemetry[key] = generation;
+      };
+      rememberEvent('clipboard', Number(model.shared?.generation), [model.shared?.lastDirection, model.shared?.lastFormats, model.shared?.lastBytes].filter(Boolean).join(' · '));
+      rememberEvent('transfer', Number(model.transfer?.generation), model.transfer?.tasks?.[0]?.name || model.recentManifest?.name || '');
+      const crossSignature = connections.map(link => `${link.fingerprint}:${Boolean(link.online)}:${link.lastError || ''}`).sort().join('|');
+      if (telemetry.crossSignature !== undefined && telemetry.crossSignature !== crossSignature) telemetry.events.push({ at: now, kind: 'cross', count: 1, detail: model.cross?.state || '' });
+      telemetry.crossSignature = crossSignature;
+      telemetry.events = telemetry.events.filter(event => event.at >= now - telemetryWindowMs).slice(-80);
+    }
+    function percentile(values, ratio) {
+      if (!values.length) return null;
+      const sorted = [...values].sort((a,b) => a-b);
+      return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * ratio) - 1))];
+    }
+    function latencyTelemetryMarkup(peerRows) {
+      const now = Date.now(), start = now - telemetryWindowMs;
+      const visible = peerRows.map((row, index) => {
+        const series = state.telemetry.links[row.peer.fingerprint] || { fingerprint:row.peer.fingerprint, label:row.peer.label || row.peer.fingerprint, color:telemetryPalette[index % telemetryPalette.length], samples:[] };
+        const samples = series.samples.filter(sample => sample.at >= start);
+        return {...series, samples, values:samples.map(sample => sample.value).filter(Number.isFinite)};
+      });
+      const allValues = visible.flatMap(series => series.values);
+      const yMax = Math.max(20, Math.ceil((Math.max(0, ...allValues) + 4) / 10) * 10);
+      const plot = { left:52, top:12, width:690, height:170 };
+      const x = at => plot.left + clamp((at - start) / telemetryWindowMs, 0, 1) * plot.width;
+      const y = value => plot.top + plot.height - clamp(value / yMax, 0, 1) * plot.height;
+      const horizontal = [0, .5, 1].map(ratio => `<line class="chart-grid" x1="${plot.left}" y1="${plot.top + plot.height * ratio}" x2="${plot.left + plot.width}" y2="${plot.top + plot.height * ratio}"/><text class="chart-axis-label" x="${plot.left - 8}" y="${plot.top + plot.height * ratio + 4}" text-anchor="end">${Math.round(yMax * (1-ratio))}</text>`).join('');
+      const vertical = [0,.25,.5,.75,1].map(ratio => `<line class="chart-grid" x1="${plot.left + plot.width * ratio}" y1="${plot.top}" x2="${plot.left + plot.width * ratio}" y2="${plot.top + plot.height}"/>`).join('');
+      const threshold = yMax >= 50 ? `<line class="chart-threshold" x1="${plot.left}" y1="${y(50)}" x2="${plot.left + plot.width}" y2="${y(50)}"/><text class="chart-axis-label" x="${plot.left + plot.width - 4}" y="${y(50) - 6}" text-anchor="end">50 ms</text>` : '';
+      const paths = visible.map(series => {
+        const segments = []; let current = [];
+        series.samples.forEach(sample => { if (Number.isFinite(sample.value)) current.push(sample); else if (current.length) { segments.push(current); current=[]; } });
+        if (current.length) segments.push(current);
+        return `<g style="--series-color:${series.color}">${segments.map(segment => {
+          if (segment.length === 1) return `<circle class="chart-point" cx="${x(segment[0].at).toFixed(1)}" cy="${y(segment[0].value).toFixed(1)}" r="3.4"/>`;
+          return `<path class="chart-line" d="${segment.map((sample, i) => `${i?'L':'M'}${x(sample.at).toFixed(1)},${y(sample.value).toFixed(1)}`).join(' ')}"/>`;
+        }).join('')}</g>`;
+      }).join('');
+      const legend = visible.map(series => `<span class="latency-legend-item" style="--series-color:${series.color}"><span class="latency-swatch"></span><strong>${escapeHtml(series.label)}</strong><span class="latency-current">${series.values.length ? `${series.values.at(-1).toFixed(1)} ms` : '—'}</span></span>`).join('');
+      const stats = visible.map(series => {
+        const current = series.values.at(-1), p95 = percentile(series.values,.95), peak = series.values.length ? Math.max(...series.values) : null;
+        const metrics = current === undefined ? telemetryText('等待样本','Waiting for samples') : telemetryText(`当前 ${current.toFixed(1)} · P95 ${p95.toFixed(1)} · 峰值 ${peak.toFixed(1)} ms`,`Now ${current.toFixed(1)} · P95 ${p95.toFixed(1)} · Peak ${peak.toFixed(1)} ms`);
+        return `<div class="latency-stat" style="--series-color:${series.color}"><span class="latency-swatch"></span><div class="latency-stat-copy"><strong>${escapeHtml(series.label)}</strong><span>${escapeHtml(metrics)}</span></div></div>`;
+      }).join('');
+      return `<section class="latency-panel"><div class="latency-legend">${legend || `<span class="muted small">${telemetryText('暂无已连接设备','No connected devices')}</span>`}</div>${allValues.length ? `<svg class="latency-chart" viewBox="0 0 760 205" role="img" aria-label="${telemetryText('设备延迟实时折线图','Live device latency chart')}">${horizontal}${vertical}${threshold}${paths}<text class="chart-axis-label" x="${plot.left}" y="202">−90 s</text><text class="chart-axis-label" x="${plot.left + plot.width}" y="202" text-anchor="end">${telemetryText('现在','Now')}</text><text class="chart-axis-label" x="10" y="12">ms</text></svg>` : `<div class="latency-empty">${telemetryText('正在收集延迟样本…','Collecting latency samples…')}</div>`}<div class="latency-stats">${stats}</div></section>`;
+    }
+    function activityTrack(kind, color) {
+      const now = Date.now(), start = now - telemetryWindowMs;
+      return `<div class="activity-track" style="--lane-color:${color}">${state.telemetry.events.filter(event => event.kind === kind).map(event => `<span class="activity-pulse" style="left:${clamp((event.at-start)/telemetryWindowMs*100,0,100).toFixed(1)}%" title="${escapeHtml(event.detail || '')}"></span>`).join('')}</div>`;
+    }
+    function activityTelemetryMarkup(model, peerRows) {
+      const withinWindow = kind => state.telemetry.events.filter(event => event.kind === kind).reduce((sum,event) => sum + event.count, 0);
+      const clipboardDetail = [model.shared?.lastDirection, model.shared?.lastFormats, model.shared?.lastBytes].filter(Boolean).join(' · ') || telemetryText('等待新的复制内容','Waiting for copied content');
+      const tasks = model.transfer?.tasks || [], task = tasks[0], transferDetail = task ? `${task.name} · ${Number(task.progress || 0).toFixed(1)}% · ${task.speed}` : telemetryText('当前没有传输','No active transfer');
+      const crossDetail = telemetryText(`${peerRows.filter(row=>row.online).length} / ${peerRows.length} 台设备在线`,`${peerRows.filter(row=>row.online).length} / ${peerRows.length} devices online`);
+      const lane = (kind, color, icon, title, count, detail, extra='') => `<section class="activity-lane" style="--lane-color:${color}"><div class="activity-lane-head"><span class="activity-icon">${svg(icon)}</span><div class="activity-copy"><strong>${title}</strong><span class="muted small">${escapeHtml(detail)}</span></div><span class="activity-count">${count}</span></div>${activityTrack(kind,color)}${extra}</section>`;
+      return `<aside class="activity-panel"><div class="activity-heading"><h3>${telemetryText('活动脉冲','Activity pulse')}</h3><span class="muted small">${telemetryText('最近 90 秒','Last 90 seconds')}</span></div>${lane('clipboard','#8f6fe8','clipboard',telemetryText('剪贴板触发','Clipboard events'),withinWindow('clipboard'),clipboardDetail)}${lane('transfer','#e59a36','download',telemetryText('文件传输','File transfers'),tasks.length || withinWindow('transfer'),transferDetail, task ? `<div class="activity-progress"><span style="width:${clamp(task.progress,0,100)}%"></span></div>` : '')}${lane('cross','#42b98a','screens',telemetryText('跨屏链路','Cross-screen links'),peerRows.filter(row=>row.online).length,crossDetail)}</aside>`;
+    }
+
+    function renderStatus() {
+      const m = currentModel();
+      const configured = m.connection.configured;
+      const manifest = m.recentManifest;
+      const tasks = m.transfer.tasks || [];
+      const peerRows = statusPeerRows(m);
+      const onlineCount = peerRows.filter(row => row.online).length;
+      const crossFailed = /失败|failed/i.test(String(m.cross.state || '')) || peerRows.some(row => row.error);
+      const crossHealthy = Boolean(m.cross.enabled) && !crossFailed && onlineCount > 0;
+      const ssh = m.ssh || { server: {}, data: { incoming: [], outgoing: [] }, sessions: [] };
+      const sshSessions = (ssh.sessions || []).length;
+      const sshAuthorizations = [...(ssh.data?.incoming || []), ...(ssh.data?.outgoing || [])]
+        .filter(item => item.account && !['cancelled','expired','rejected','revoked'].includes(item.status)).length;
+      const sshRunning = Boolean(ssh.server?.running);
+      const sshState = sshSessions ? sshText('SSH 已连接','SSH connected') : sshRunning ? sshText('服务运行中','Service running') : sshText('未运行','Not running');
+      const sshDetail = sshText(`${sshSessions} 个活动会话 · ${sshAuthorizations} 项授权`, `${sshSessions} active sessions · ${sshAuthorizations} authorizations`);
+      return heading('状态总览', 'Pierdesk 正在后台运行') + `
+        <article class="card status-hero">
+          <div class="workspace-summary">
+            <section class="local-summary">
+              <div class="local-identity"><span class="local-monitor">${svg('monitor')}</span><div class="local-copy"><span class="muted small">本机</span><strong>${escapeHtml(m.localLabel || '本机')}</strong><span class="fingerprint mono">${escapeHtml(m.localFingerprint)}</span></div></div>
+              <div class="workspace-health"><div class="workspace-health-copy"><span class="muted small">跨屏工作区</span><strong>${escapeHtml(m.cross.state || '等待中')}</strong><span class="muted small">${peerRows.length ? `${onlineCount} / ${peerRows.length} 台设备已连接` : '尚未加入远端设备'}</span></div><span class="workspace-count ${crossFailed ? 'failed' : ''}">${crossFailed ? '!' : `${onlineCount}/${peerRows.length}`}</span></div>
+            </section>
+            <section class="peer-overview">
+              <div class="peer-overview-head"><h2>工作区设备</h2><span class="chip ${crossHealthy ? 'green' : crossFailed ? 'red' : 'amber'}">${crossHealthy ? '连接正常' : crossFailed ? '需要处理' : '等待连接'}</span></div>
+              <div class="peer-overview-list">${peerRows.length ? peerRows.map(row => `<article class="peer-overview-row ${row.error ? 'error' : ''}"><div class="peer-identity"><span class="peer-monitor">${svg('monitor')}</span><div class="peer-copy"><strong>${escapeHtml(row.peer.label || row.peer.fingerprint)}</strong><span class="muted small mono">${escapeHtml(row.link?.endpoint || row.peer.endpoint || '地址等待发现')}</span></div></div><div class="peer-route"><strong>${escapeHtml(row.boundary)}</strong><span class="muted small">${row.error ? escapeHtml(runtimeErrorText(row.error)) : `延迟 ${escapeHtml(row.latency)}`}</span></div><div class="peer-state"><span class="chip ${row.error ? 'red' : row.online ? 'green' : 'amber'}">${escapeHtml(row.stateLabel)}</span><span class="dot ${row.online && !row.error ? 'green' : ''}"></span></div></article>`).join('') : `<div class="empty">当前没有加入跨屏工作区的远端设备。</div>`}</div>
+            </section>
+          </div>
+          <div class="facts"><div class="fact">${svg('link')}<span>监听 ${escapeHtml(m.connection.localEndpoint || '未配置')}</span></div><div class="fact">${svg('check')}<span>${onlineCount} 台跨屏设备在线</span></div><div class="fact">${svg('info')}<span>最低延迟 ${escapeHtml(m.cross.latency || '等待中')}</span></div></div>
+        </article>
+        ${m.lastError ? `<aside class="status-alert" role="alert">${svg('info','large')}<div class="status-alert-copy"><strong>最近错误</strong><span>${escapeHtml(runtimeErrorText(m.lastError))}</span></div><button class="button" data-action="open-log">打开诊断日志</button></aside>` : ''}
+        ${m.lastNotice ? `<aside class="status-notice" role="status">${svg('info','large')}<div class="status-notice-copy"><strong>控制提示</strong><span>${escapeHtml(m.lastNotice)}</span></div></aside>` : ''}
+        <article class="card telemetry-card"><div class="telemetry-head"><div class="telemetry-title"><h2>${svg('globe')}实时链路</h2><span class="muted small">逐台设备显示真实 TLS 心跳往返延迟</span></div><span class="telemetry-live">实时更新 · 最近 90 秒</span></div><div class="telemetry-layout">${latencyTelemetryMarkup(peerRows)}${activityTelemetryMarkup(m,peerRows)}</div></article>
+        <div class="status-grid" style="margin-top:14px">
+          ${statusCard('局域网发现', m.discovery.running ? '运行中' : '不可用', `发现 ${m.discovery.peersFound} 台设备`, 'refresh', 'green')}
+          ${statusCard('文件剪贴板', configured ? '已连接' : '尚未配置', configured ? '等待新的复制内容' : '请打开连接设置', 'clipboard')}
+          ${statusCard('共享剪贴板', m.shared.enabled ? '已开启' : '未开启', '纯文字、网页/富文本、截图/图片', 'clipboard', 'purple')}
+          ${statusCard('跨屏控制', m.cross.state, `${onlineCount} / ${peerRows.length} 台设备已连接`, 'screens', crossHealthy ? 'green' : crossFailed ? 'red' : 'amber', crossHealthy)}
+          ${statusCard('最近远端清单', manifest ? manifest.name : '暂无', manifest ? `${manifest.files} 个文件 · ${manifest.size}` : '等待远端文件清单', 'file')}
+          ${statusCard('活动传输', tasks.length ? `${tasks.length} 个任务` : '暂无', tasks.length ? tasks[0].state : '当前没有传输', 'download', 'amber')}
+          ${statusCard('最近错误', m.lastError ? runtimeErrorText(m.lastError) : '无', m.lastError ? '请打开诊断日志' : '所有服务状态正常', m.lastError ? 'info' : 'check', m.lastError ? 'red' : 'green', !m.lastError)}
+          ${statusCard('随 Windows 启动', m.autostart ? '已开启' : '未开启', autostartDetail(m), 'monitor')}
+          ${statusCard(sshText('SSH 远程工作','SSH remote work'), sshState, sshDetail, 'shield', sshSessions ? 'green' : '', sshRunning || sshSessions > 0)}
+        </div>
+        <div class="row between" style="margin-top:18px"><button class="button" data-action="refresh">${svg('refresh')}刷新状态</button><button class="button ghost" data-action="open-log">打开诊断日志</button></div>`;
+    }
+    function autostartDetail(m) {
+      const result = String(m.autostartLastResult || ''), at = m.autostartLastRun ? `，${m.autostartLastRun}` : '';
+      if (m.autostart && result.startsWith('failed:')) return `已开启 · 上次登录启动失败（代码 ${result.slice(7)}${at}）`;
+      if (m.autostart && result === 'ok') return `当前 Windows 用户 · 上次登录启动成功${at ? `（${m.autostartLastRun}）` : ''}`;
+      return '当前 Windows 用户';
+    }
+    function statusCard(title, primary, secondary, ico, color='', healthy = !['不可用','未开启','未运行','Unavailable','Disabled','Not running'].includes(primary)) {
+      return `<article class="card status-card"><span class="round-icon ${color}">${svg(ico,'large')}</span><div class="status-copy"><strong>${escapeHtml(title)}</strong><span><span class="dot ${healthy ? 'green' : ''}" style="display:inline-block;margin-right:8px"></span>${escapeHtml(primary)}</span><span class="muted small">${escapeHtml(secondary)}</span></div></article>`;
+    }
+
+    function renderDevices() {
+      const m = currentModel();
+      const pairing = m.pairing;
+      const discovered = m.discovered || [];
+      const peers = m.peers || [];
+      return heading('设备与配对', '发现并管理同一局域网中的可信设备') + `
+        <article class="card"><div class="steps"><div class="step">${svg('monitor','large')}<span class="step-number">1</span>发现设备</div><span class="step-arrow">→</span><div class="step">${svg('shield','large')}<span class="step-number">2</span>核对验证码</div><span class="step-arrow">→</span><div class="step">${svg('screens','large')}<span class="step-number">3</span>完成配对</div></div><div class="security-note">${svg('shield')}只有两台电脑显示的验证码一致时才允许配对</div></article>
+        ${m.pairingMessage ? `<div class="validation" style="margin-top:14px">${svg('info')} ${escapeHtml(pairingMessageText(m.pairingMessage))}</div>` : ''}
+        <div class="section-title"><h2>发现的新设备</h2><span class="row small" style="color:var(--green)"><span class="dot green"></span>${m.discovery.running ? '正在扫描局域网' : '发现服务不可用'}</span></div>
+        <div class="device-list">${discovered.length ? discovered.map(device => discoveredCard(device, pairing)).join('') : `<article class="card empty">暂未发现可配对的新设备。请确认另一台电脑已打开 Pierdesk 并位于同一局域网。</article>`}</div>
+        <div class="section-title"><h2>已配对设备</h2><span class="muted small">${peers.length} 台可信设备 · 可同时保留并加入跨屏工作区</span></div>
+        <div class="device-list">${peers.length ? peers.map(peer => pairedCard(peer)).join('') : `<article class="card empty">当前没有已配对设备。</article>`}</div>
+        <p class="muted small">${svg('info')} 取消配对后，需要重新核对验证码才能连接。</p>`;
+    }
+    function discoveredCard(device, pairing) {
+      const active = pairing && pairing.fingerprint === device.fingerprint;
+      return `<article class="card device-card"><div><div class="device-title">${svg('monitor','large')}<h3>${escapeHtml(device.label)}</h3>${chip('可配对','green')}</div><div class="device-meta"><span>${svg('globe')} ${escapeHtml(device.address)}</span><span class="mono">${escapeHtml(device.fingerprint)}</span></div></div>${active ? `<div class="verification"><span class="muted small">双端验证码</span><strong class="verification-code">${escapeHtml(pairing.code)}</strong><span class="muted small">请在两台电脑上核对</span></div><div class="stack"><button class="button primary" data-action="approve-pairing">允许配对</button><button class="button" data-action="reject-pairing">拒绝</button></div>` : `<div class="muted small">通过局域网发现<br>配对后保存双向 TLS 身份</div><button class="button primary" data-action="pair" data-fingerprint="${escapeHtml(device.fingerprint)}">开始配对</button>`}</article>`;
+    }
+    function pairedCard(peer) {
+      const code = compactFingerprint(peer.fingerprint);
+      const screen = peer.screen || {}, screenReady = Number(screen.pixelWidth) > 1 && Number(screen.pixelHeight) > 1 && Number(screen.physicalWidthMillimeters) > 0 && Number(screen.physicalHeightMillimeters) > 0;
+      const screenState = screenReady ? `屏幕信息已同步 · ${screen.pixelWidth}×${screen.pixelHeight} · ${screen.physicalWidthMillimeters}×${screen.physicalHeightMillimeters} mm` : peer.online ? '屏幕信息同步中' : '等待设备上线后同步屏幕信息';
+      return `<article class="card device-card"><div><div class="device-title">${svg('monitor','large')}<h3>${escapeHtml(peer.label)}</h3>${chip(peer.online ? '在线':'离线',peer.online?'green':'')}</div><div class="device-meta"><span class="device-code" title="${escapeHtml(peer.fingerprint)}"><code class="mono">${escapeHtml(code)}</code><button class="copy-code" data-copy="${escapeHtml(peer.fingerprint)}" aria-label="复制完整设备码" title="复制完整设备码">${svg('file')}</button></span><span>${escapeHtml(peer.endpoint || '地址等待发现')}</span></div></div><div class="stack small"><span>${svg('lock')} 双向 TLS 1.3</span><span>${svg('info')} ${screenState}</span></div><div class="device-actions"><button class="button ghost" data-ssh="go" data-peer="${escapeHtml(peer.fingerprint)}">${sshText('远程工作','Remote work')}</button><button class="button danger" data-confirm="revoke" data-fingerprint="${escapeHtml(peer.fingerprint)}" data-label="${escapeHtml(peer.label)}">取消配对</button></div></article>`;
+    }
+
+    function compactFingerprint(value) {
+      const parts = String(value || '').split(':');
+      return parts.length > 8 ? `${parts.slice(0,4).join(':')}…${parts.slice(-4).join(':')}` : String(value || '—');
+    }
+
+    function boundaryRuntimeSettingsMarkup(c) {
+      return `<div class="boundary-advanced-settings"><div class="boundary-master row between"><div class="setting-label"><strong>使用已应用的边界范围</strong><span class="muted small">关闭后临时使用固定方向；正在编辑的草稿会保留</span></div>${switchButton(c.boundaryMapV2Enabled!==false,'toggle-boundary-map-v2','使用已应用的边界范围')}</div><div class="boundary-panel"><div class="boundary-master row between"><div class="setting-label"><strong>屏幕四角防误触</strong><span class="muted small">仅影响目前运行中的边界；新草稿会在最终应用时编译 32 像素保护</span></div>${switchButton(c.cornerGuardEnabled,'toggle-corner','屏幕四角防误触')}</div><div class="boundary-range"><div class="setting-label"><strong>四角保护范围</strong><span class="muted small">拖动范围 0–512 像素</span></div><input id="corner-range" type="range" min="0" max="512" value="${c.cornerGuardPixels}" aria-label="四角保护范围" ${c.cornerGuardEnabled?'':'disabled'}><output class="value-box" id="corner-output">${c.cornerGuardPixels} 像素</output></div><div class="boundary-options"><div class="boundary-option"><div class="setting-label"><strong>跨越前需要二次顶边</strong><span class="muted small">鼠标需要连续两次抵达屏幕边缘才会跨越</span></div>${switchButton(c.requireSecondPush,'toggle-second-push','跨越前需要二次顶边')}</div><div class="boundary-option"><div class="setting-label"><strong>全屏应用运行时暂停</strong><span class="muted small">检测到全屏应用时临时暂停跨屏功能</span></div>${switchButton(c.pauseOnFullscreen,'toggle-fullscreen','全屏应用运行时暂停')}</div><div class="boundary-option"><div class="setting-label"><strong>${sshText('保持链路热身（插电时）','Keep links warm (on AC power)')}</strong><span class="muted small">${sshText('使用中持续与对端保持较密的心跳，减少闲置后首次跨屏的卡顿；任一端用电池时自动停用','While in use, keep a denser heartbeat to peers to avoid stutter on the first crossing after idle; turns off automatically when either end is on battery')}</span></div>${switchButton(c.keepLinkWarm!==false,'toggle-keep-link-warm',sshText('保持链路热身（插电时）','Keep links warm (on AC power)'))}</div></div><div class="cursor-locator-tip">${svg('info')}<div class="setting-label"><strong>${sshText('快速定位鼠标','Find the pointer')}</strong><span class="muted small">${sshText('连续按两次右 Alt，光圈会迅速聚集到当前鼠标位置','Press Right Alt twice and rings will rapidly converge on the pointer')}</span></div><span class="shortcut-keys"><kbd>${sshText('右 Alt','Right Alt')}</kbd><b>× 2</b></span></div></div></div>`;
+    }
+
+    function pairSwitchRow(row, m, globalOff) {
+      const english = m.language === 'en';
+      const blocked = globalOff || !row.online;
+      const status = !row.online ? (english ? 'Peer offline' : '对端离线') : row.enabled ? (english ? 'Cross-screen on' : '跨屏已开启') : (english ? 'Cross-screen off' : '跨屏已停用');
+      const hint = globalOff ? (english ? 'Turn on cross-screen control first' : '请先开启跨屏控制') : !row.online ? (english ? 'Both computers must be online to switch' : '两台电脑需同时在线才能切换') : '';
+      const label = escapeHtml(row.label);
+      return `<div class="setting-row pair-switch-row"><span class="dot ${row.online ? 'green' : ''}"></span><div class="setting-label"><strong>${label}</strong><span class="muted small">${hint}</span></div>${chip(status, row.enabled && row.online ? 'green' : '')}<button class="switch ${row.enabled ? 'on' : ''}" role="switch" aria-checked="${row.enabled}" aria-label="${english ? 'Cross-screen control with ' : '与此设备的跨屏控制：'}${label}" data-action="toggle-pair" data-fingerprint="${escapeHtml(row.fingerprint)}" ${blocked ? 'disabled' : ''}></button></div>`;
+    }
+    function renderPairSwitches(m) {
+      const rows = Array.isArray(m.pairSwitches) ? m.pairSwitches : [];
+      if (!rows.length) return '';
+      const english = m.language === 'en';
+      const globalOff = !m.cross.enabled;
+      return `<section class="card pair-switch-card"><div class="pair-switch-head"><h2>${english ? 'Device connections' : '设备连接'}</h2><p class="muted small">${english ? 'Turn cross-screen control on or off for one pair of computers. Boundary settings and pairing are not changed.' : '按电脑对单独开启或关闭跨屏控制。不会修改边界设置，也不会解除配对。'}</p></div>${rows.map(row => pairSwitchRow(row, m, globalOff)).join('')}</section>`;
+    }
+
+    function renderCross() {
+      const m = currentModel(), c = m.cross;
+      const canResume = ['已暂停','已锁定本机','失败'].includes(c.state);
+      return heading('跨屏控制', '让鼠标和键盘自然跨越多台电脑') + `
+        <div class="cross-toolbar"><article class="card toolbar-status row between"><div class="row"><span class="dot ${c.enabled ? 'green':''}"></span><strong>跨屏控制${escapeHtml(c.state)}</strong><span class="muted">延迟 ${escapeHtml(c.latency || '等待中')}</span></div>${switchButton(c.enabled,'toggle-cross','开启跨屏控制')}</article><article class="card toolbar-actions"><button class="button" data-action="return-local">${svg('external')}立即切回本机</button><button class="button" data-action="${canResume?'resume-cross':'pause-cross'}">${svg(canResume?'play':'lock')}${canResume?'恢复跨屏控制':'暂时锁定在本机'}</button></article></div>
+        ${renderPairSwitches(m)}
+        ${renderBoundaryEditor(m)}`;
+    }
+
+    function layoutSlot(position, current, cross, pending, peers) {
+      const applying = pending && pending.placement === position;
+      const occupied = !pending && current && cross.placement === position;
+      const peer = applying ? peers.find(item => item.fingerprint === pending.fingerprint) : current;
+      const content = applying
+        ? `<span class="layout-applying-device">${svg('monitor','large')}<span class="applying-status"><span class="spinner"></span>正在应用布局…</span><span class="applying-detail">正在建立连接并同步配置，请稍候</span><strong>${escapeHtml(peer?.label || '')}</strong></span>`
+        : occupied
+          ? `<span class="layout-device" draggable="true" data-peer-drag="${escapeHtml(current.fingerprint)}">${svg('monitor','large')}<span class="peer-role">已连接从机</span><strong>${escapeHtml(current.label)}</strong><span class="small"><span class="dot ${current.online?'green':''}" style="display:inline-block"></span> ${current.online?'在线':'离线'}</span></span>`
+          : `<span>${svg('monitor','large')}<strong>${placementLabel(position)}</strong><small>拖到此处</small></span>`;
+      return `<button class="layout-slot ${occupied?'occupied':''} ${applying?'applying':''}" data-placement="${position}" data-layout-drop="${position}" aria-label="${placementLabel(position)}布局位置" ${applying?'aria-busy="true" disabled':''}>${content}</button>`;
+    }
+
+    function draggablePeer(peer, pending) {
+      const applying = pending?.fingerprint === peer.fingerprint;
+      return `<div class="draggable-peer ${peer.online?'':'offline'} ${applying?'applying':''}" draggable="${peer.online && !applying}" data-peer-drag="${escapeHtml(peer.fingerprint)}" ${applying?'aria-busy="true"':''}>${applying?'<span class="spinner"></span>':svg('monitor','large')}<div><strong>${escapeHtml(peer.label)}</strong><span class="small">${applying?'应用中':`<span class="dot ${peer.online?'green':''}" style="display:inline-block"></span> ${peer.online?'在线':'离线'}${peer.current?' · 当前设备':''}`}</span></div><button class="button ghost ssh-device-link" data-ssh="go" data-peer="${escapeHtml(peer.fingerprint)}" draggable="false">SSH</button></div>`;
+    }
+
+    function renderClipboard() {
+      const m = currentModel(), s = m.shared;
+      return heading('共享剪贴板', '在已配对电脑之间同步常用剪贴板内容') + `
+        <article class="card master-card"><div class="row between"><div class="setting-label"><h2>开启共享剪贴板</h2><span class="muted">复制后自动发送到当前已配对设备</span>${chip(s.enabled?'运行中':'未开启',s.enabled?'green':'')}</div>${switchButton(s.enabled,'toggle-shared','开启共享剪贴板')}</div></article>
+        <div class="section-title"><h2>支持的内容</h2></div><div class="capability-grid">${capability('file','纯文字','Unicode 文本')}${capability('globe','网页与富文本','HTML · RTF')}${capability('image','截图与图片','PNG · DIBV5 · DIB')}</div>
+        <article class="card sync-card" style="margin-top:16px"><h2>最近一次同步</h2>${s.lastDirection ? `<div class="sync-route"><div class="device-box">${svg('monitor')}本机</div><div class="route-arrow"></div><div class="device-box">${svg('monitor')}${escapeHtml(m.peerLabel)}</div></div><div class="sync-facts"><div><span class="muted small">方向</span><div>${escapeHtml(s.lastDirection)}</div></div><div><span class="muted small">格式</span><div>${escapeHtml(s.lastFormats)}</div></div><div><span class="muted small">大小</span><div>${escapeHtml(s.lastBytes)}</div></div><div><span class="muted small">状态</span><div style="color:var(--green)">${svg('check')} 同步完成</div></div></div>` : `<div class="empty">等待新的复制内容</div>`}<p class="muted small">${svg('lock')} 内容仅通过已配对设备之间的局域网加密连接传输</p></article>
+        <article class="card info-strip" style="margin-top:16px"><span class="round-icon">${svg('folder','large')}</span><div style="flex:1"><h3>文件和文件夹</h3><span class="muted">由文件剪贴板通道处理；在另一台电脑的资源管理器中直接粘贴</span></div><button class="button ghost" data-page="transfer">前往传输中心${svg('chevron')}</button></article>`;
+    }
+    function capability(ico,title,sub) { return `<article class="card capability"><span class="round-icon">${svg(ico,'large')}</span><div><h3>${title}</h3><span class="muted small">${sub}</span></div><div class="capability-check"><span style="color:#22b43a">${svg('check')}</span>随总开关启用</div></article>`; }
+
+    function renderTransfer() {
+      const m = currentModel(), t = m.transfer, tasks = t.tasks || [], task = tasks[0];
+      const controls = tasks.filter(task => task.controllable === true);
+      return heading('传输中心', '查看状态并控制正在进行的文件传输') + `
+        <article class="card transfer-summary"><h2>${tasks.length ? `${tasks.length} 个任务正在传输` : '当前没有传输任务'}</h2><span>${task ? `${escapeHtml(task.transferred)} / ${escapeHtml(task.total)}` : '—'}</span><span>${m.language==='en'?'Current speed':'实时速度'} ${task ? escapeHtml(task.speed) : '—'}</span><div class="stack"><button class="button primary" data-action="open-transfer">${svg('external')}打开独立传输中心</button><span class="muted small">关闭窗口不会暂停或取消传输</span></div></article>
+        <div class="section-title between"><h2>当前任务</h2><div class="row"><button class="button" data-action="pause-all" ${controls.some(task=>task.stateCode!=='paused')?'':'disabled'}>${svg('pause')}全部暂停</button><button class="button" data-action="resume-all" ${controls.some(task=>task.stateCode==='paused')?'':'disabled'}>${svg('play')}全部继续</button><button class="button danger" data-confirm="cancel-all" ${controls.length?'':'disabled'}>${svg('cancel')}全部取消</button></div></div>
+        <p class="muted small">${m.language==='en'?'Pause, resume or cancel transfers from either device.':'发送和接收设备均可暂停、继续或取消传输。'}</p>
+        ${tasks.length ? tasks.map(transferTask).join('') : `<article class="card empty">窗口保持可用；收到任务后可以随时打开查看。</article>`}
+        <div class="section-title"><h2>待确认的文件剪贴板</h2></div><article class="card pending-card"><div class="row">${svg('clipboard','large')}<span>${t.pendingOffer?'收到待确认的远端文件清单':'没有待确认的文件剪贴板'}</span></div><button class="button ${t.pendingOffer?'primary':''}" data-action="accept-pending" ${t.pendingOffer?'':'disabled'}>接收待确认内容</button></article>
+        <div class="section-title"><h2>窗口与历史记录</h2></div><article class="card preference-grid"><div class="setting-row"><strong>收到新传输时自动弹出窗口</strong>${switchButton(t.autoPopup,'toggle-auto-popup','收到新传输时自动弹出窗口')}</div><div class="setting-row"><div class="setting-label"><strong>历史记录保留</strong><span class="muted small">范围 1–500</span></div>${stepper('history',t.historyLimit,'条')}</div><div class="setting-row"><strong>历史记录行高</strong>${stepper('row-height',t.rowHeight,'px')}</div><div class="setting-row"><span class="muted">完整任务表与详情位于独立窗口</span><button class="button" data-action="open-transfer-history">查看历史记录${svg('chevron')}</button></div></article>`;
+    }
+    function transferTask(task) {
+      const paused = task.stateCode === 'paused', enabled = task.controllable === true;
+      const hint = currentModel().language === 'en' ? 'This transfer can be controlled from either device.' : '可在发送或接收设备控制此任务。';
+      return `<article class="card transfer-item"><div class="row"><span class="round-icon amber">${svg('folder','large')}</span><div class="setting-label"><strong>${escapeHtml(task.name)}</strong><span class="muted small">${task.files} 个文件 · ${task.directories} 个文件夹</span>${chip(task.state,task.stateCode==='running'?'green':'amber')}</div></div><div class="progress-wrap"><span>${escapeHtml(task.directionDetail)}</span><div class="progress"><i style="width:${Number(task.progress)||0}%"></i></div><div class="row between small"><span>${escapeHtml(task.transferred)} / ${escapeHtml(task.total)}</span><span>${currentModel().language==='en'?'Current speed':'实时速度'} ${escapeHtml(task.speed)}</span></div></div><div class="transfer-actions"><button class="button" data-action="pause-task" data-task="${escapeHtml(task.key)}" ${enabled?'':'disabled'}>${svg(paused?'play':'pause')}${paused?'继续':'暂停'}</button><button class="button" data-action="cancel-task" data-task="${escapeHtml(task.key)}" ${enabled?'':'disabled'}>${svg('cancel')}取消</button>${task.receiving ? `<button class="button details" data-action="open-transfer">查看详情${svg('chevron')}</button>` : `<span class="muted small">${hint}</span>`}</div></article>`;
+    }
+    function stepper(kind,value,unit) {
+      const center = kind === 'history'
+        ? `<label class="stepper-input-wrap"><input class="stepper-input" id="history-limit" type="number" min="1" max="500" step="1" value="${value}" inputmode="numeric" aria-label="历史记录保留数量"><span class="stepper-unit">${unit}</span></label>`
+        : `<output>${value} ${unit}</output>`;
+      return `<div class="stepper"><button data-step="${kind}" data-delta="-1" aria-label="减小">−</button>${center}<button data-step="${kind}" data-delta="1" aria-label="增大">＋</button></div>`;
+    }
+
+    function renderConnection() {
+      const m = currentModel(), c = state.connectionDraft || {...m.connection};
+      const peers = m.peers || [];
+      return heading('连接设置', '为特殊局域网环境手动调整当前设备的地址') + `<div class="connection-layout"><div>
+        <article class="card discovery-card"><div class="row"><h2>自动发现</h2>${chip(m.discovery.running?'运行中':'不可用',m.discovery.running?'green':'red')}</div><p class="muted">当前地址由局域网发现自动维护</p><div class="discovery-facts"><div class="fact">${svg('devices')}发现 ${m.discovery.peersFound} 台可信设备</div><div class="fact">${svg('check')}当前路由${m.discovery.issue?'存在冲突':'正常'}</div></div></article><p class="muted small">VPN、多网卡或特殊路由下可在下方手动修改</p>
+        <form class="card connection-form" id="connection-form"><h2>活动连接</h2><label class="field device-select">活动目标设备<select class="select" id="active-peer">${peers.map(p=>`<option value="${escapeHtml(p.fingerprint)}" ${c.activePeer===p.fingerprint?'selected':''}>${escapeHtml(p.label)}${p.online?' · 在线':''}</option>`).join('')}</select></label><div class="endpoint-grid"><label class="field">本机服务地址<input class="input endpoint" id="local-endpoint" value="${escapeHtml(c.localEndpoint || '')}" spellcheck="false"></label>${svg('arrow')}<label class="field">对端服务地址<input class="input endpoint" id="peer-endpoint" value="${escapeHtml(c.peerEndpoint || '')}" spellcheck="false"></label></div><p class="muted small">仅允许回环地址或专用局域网地址，端口不能为 0</p><div class="setting-row"><div class="setting-label"><strong>自动接收文件清单</strong><span class="muted small">收到该设备的文件清单后，自动替换本机文件剪贴板</span></div>${switchButton(c.autoReceive,'draft-auto-receive','自动接收文件清单')}</div><div class="validation">${svg('check')} ${c.valid === false ? '请检查地址格式' : '地址有效 · 两台设备位于同一局域网路径'}</div><div class="row" style="margin-top:20px"><button class="button primary" type="submit">保存并应用</button><button class="button" type="button" data-action="discard-connection">放弃更改</button></div></form>
+      </div><aside class="card connection-help"><h2>适用场景</h2><ul><li>VPN 改变了默认局域网路由</li><li>电脑同时连接多个专用网络</li><li>虚拟网卡占用了对端地址</li></ul><div class="divider"></div><p class="small">检测到地址冲突时，Pierdesk 会保留原配置并暂停该路径；冲突解除后自动恢复。</p><p class="small">每次只能选择一个活动目标设备。</p></aside></div>`;
+    }
+
+    function renderGeneral() {
+      const m = currentModel(), c = m.cross;
+      return `<div class="general-page">${heading('常规', '管理启动方式、后台运行与诊断')}
+        <article class="card general-row"><span class="round-icon green">${svg('monitor','large')}</span><div class="setting-label"><h2>${m.language==='en'?'Screenshot':'截图'}</h2><span class="muted">${m.language==='en'?'Capture on the computer you are controlling. Done copies the image to the shared clipboard.':'在当前控制的电脑截图，完成后图片进入共享剪贴板。'}</span>${m.screenshotError?`<span class="muted" style="color:var(--red)">${escapeHtml(m.screenshotError)}</span>`:''}<span class="muted small">${m.language==='en'?'Click the field and press a shortcut, then save. Use the same shortcut on each computer.':'点击输入框按下新组合后保存；各台电脑请使用相同的截图快捷键。'}</span></div><div class="general-actions"><input class="select" id="screenshot-shortcut" style="width:180px" value="${escapeHtml(m.screenshotShortcut||'Alt+X')}" aria-label="Screenshot shortcut"><button class="button" data-action="screenshot-hotkey-save">${m.language==='en'?'Save shortcut':'保存快捷键'}</button><button class="button" data-action="screenshot">${m.language==='en'?'Capture':'开始截图'}</button></div></article>
+        <article class="card general-card"><div class="general-row"><span class="round-icon">${svg('globe','large')}</span><div class="setting-label"><h2>界面语言</h2><span class="muted">首次安装默认使用 English，可随时切换为简体中文</span></div><select class="select language-select" id="ui-language" aria-label="界面语言"><option value="en" ${m.language==='en'?'selected':''}>English</option><option value="zh-CN" ${m.language==='zh-CN'?'selected':''}>简体中文</option></select></div><div class="general-row"><span class="round-icon">${svg('type','large')}</span><div class="setting-label"><h2>界面字体大小</h2><span class="muted">调整设置中心的文字与控件比例</span></div><div class="font-scale-control"><input id="font-scale" type="range" min="50" max="125" step="5" value="${clamp(m.fontScale || 100,50,125)}" aria-label="界面字体大小"><output id="font-scale-output">${clamp(m.fontScale || 100,50,125)}%</output></div></div><div class="general-row"><span class="round-icon">${svg('monitor','large')}</span><div class="setting-label"><h2>随 Windows 启动</h2><span class="muted">${m.autostartState === 'stale' ? '启动配置需要修复：请以管理员身份重新开启此选项' : '当前用户登录后自动启动；管理员模式使用登录计划任务'}</span></div>${switchButton(m.autostart,'toggle-autostart','随 Windows 启动')}</div><div class="general-row"><span class="round-icon green">${svg('tray','large')}</span><div class="setting-label"><h2>后台运行</h2><span class="muted">Pierdesk 正常驻留在系统托盘；关闭设置窗口不会退出程序</span></div>${chip('正在运行','green')}</div><div class="background-flow"><div class="flow-item">${svg('settings','large')}<span>关闭设置窗口</span></div><span class="flow-arrow">→</span><div class="flow-item">${svg('tray','large')}<span>系统托盘图标保持运行</span></div><span class="flow-arrow">→</span><div class="flow-item">${svg('clipboard','large')}<span>剪贴板与跨屏服务继续工作</span></div></div></article>
+        <div class="section-title"><h2>权限与兼容性</h2></div><article class="card general-compat"><div class="general-compat-grid"><div class="compat-identity"><span class="round-icon ${c.admin?'green':''}">${svg('shield','large')}</span><div class="setting-label"><strong>当前进程权限：${c.admin?'管理员权限':'普通权限'}</strong><span class="muted small">${c.admin?'当前后台实例已提权':'兼容性选项不会提升已经运行的旧实例'}</span><button class="button" data-action="restart-admin" ${c.admin?'disabled':''}>${svg('shield')}${c.admin?'已以管理员身份运行':'替换为管理员实例'}</button></div></div><ul class="compat-notes"><li>${svg('info')}<span>普通权限无法控制管理员窗口</span></li><li>${svg('info')}<span>管理员权限仍无法控制 UAC 安全桌面、登录界面或 Ctrl+Alt+Del</span></li><li>${svg('info')}<span>游戏、反作弊程序、Raw Input、独占全屏和远程桌面不在兼容优化范围</span></li></ul><button class="button ghost" data-action="compatibility">查看完整兼容性说明${svg('chevron')}</button></div></article>
+        <div class="section-title"><h2>诊断</h2></div><article class="card general-row"><span class="round-icon">${svg('log','large')}</span><div class="setting-label"><h3>诊断日志</h3><span class="muted">记录设备发现、连接、剪贴板与传输状态，不写入配对密钥和传输凭据</span><span class="mono subtle small">${escapeHtml(m.logPath)}</span></div><div class="general-actions"><button class="button" data-action="open-log">打开诊断日志</button><button class="button" data-action="open-log-folder">打开日志文件夹</button></div></article>
+        <div class="section-title"><h2>退出程序</h2></div><article class="card general-row danger-card"><span class="round-icon" style="color:var(--red);background:var(--red-soft)">${svg('power','large')}</span><div class="setting-label"><h3>退出 Pierdesk</h3><span class="muted">停止跨屏控制、剪贴板同步和正在运行的传输服务</span><span class="subtle small">退出前会安全释放跨屏输入状态</span></div><button class="button danger" data-confirm="exit">退出 Pierdesk</button></article></div>`;
+    }
+
+    function supportPayCard(provider, mark, title, scan, alt) {
+      const qr = provider === 'wechat' ? '__WECHAT_SUPPORT_QR__' : '__ALIPAY_SUPPORT_QR__';
+      return `<article class="card support-pay-card"><div class="support-provider-copy"><div class="support-provider-title"><span class="support-provider-mark ${provider}">${mark}</span><h3>${title}</h3></div><p>${scan}</p><button class="button" data-action="support-qr" data-provider="${provider}">放大二维码</button></div><img class="support-qr-preview" src="${qr}" alt="${alt}"></article>`;
+    }
+
+    function renderSupport() {
+      return heading('支持作者', '开源、免费，也能长久') + `
+        <article class="card support-hero"><div class="support-hero-copy"><div class="support-eyebrow">感谢你使用 Pierdesk</div><h2>Pierdesk 会继续免费、开源</h2><p>如果 Pierdesk 帮你省下了时间，欢迎自愿请作者喝杯咖啡。你的支持会用于持续开发、测试设备和发布维护。</p><div class="support-promise"><span>${svg('check')}核心功能始终免费</span><span>${svg('check')}不解锁付费权益</span><span>${svg('check')}不记录支持行为</span></div></div><div class="support-heart">${svg('heart')}</div></article>
+        <div class="support-section-head"><div><h2>选择一种方式</h2><p>请使用手机扫码，金额完全随意。</p></div></div>
+        <div class="support-pay-grid">${supportPayCard('wechat', '微', '微信支付', '打开微信扫一扫', '微信支付 / WeChat Pay 二维码')}${supportPayCard('alipay', '支', '支付宝', '打开支付宝扫一扫', '支付宝 / Alipay 二维码')}</div>
+        <article class="card support-note">${svg('lock')}<div><h3>支付与隐私</h3><p>付款由微信或支付宝直接处理。Pierdesk 不接收付款状态、不保存支付信息，也不会因为是否支持而改变任何功能。</p></div></article>
+        <article class="card support-other"><div><h3>不方便扫码？</h3><p>给项目点 Star、反馈问题、分享给需要多台 Windows 电脑协作的人，同样是非常实在的支持。</p></div><button class="button" data-action="open-source">查看开源项目</button></article>`;
+    }
+
+    function renderAbout() {
+      const m = currentModel();
+      return heading('关于 Pierdesk', '设备各自运行，工作自然衔接。') + `
+        <article class="card about-hero"><img class="about-logo" src="__PIERDESK_ICON__" alt="Pierdesk 图标"><div><div class="about-name">Pierdesk</div><p class="muted" style="margin:6px 0">版本 ${escapeHtml(m.version)}<br>作者：micky-meecky</p><div class="badges"><span class="badge">Windows 10 / 11 x64</span><span class="badge">Rust</span><span class="badge">WebView2</span></div></div></article>
+        <div class="about-grid"><article class="card about-story"><h2>跨设备，仍像在本机</h2><p>Pierdesk 把已配对的 Windows 电脑连接成一个连贯工作空间：鼠标越过屏幕边界，键盘随当前设备切换，剪贴板和文件也能继续流转。</p><p>它不投屏、不接管远程桌面。每台电脑保持独立运行，只通过已配对的局域网加密连接同步必要的输入与内容。</p><p>多设备配对和图形化屏幕布局会保留每台电脑的可信身份与位置，重新上线后无需重复配置。</p></article><article class="card project-info"><h2>版本与开源</h2><div class="info-table"><div class="info-row"><span class="muted">版本</span><strong>${escapeHtml(m.version)}</strong></div><div class="info-row"><span class="muted">支持系统</span><strong>Windows 10 / 11 x64</strong></div><div class="info-row"><span class="muted">许可证</span><strong>GPL-3.0-only</strong></div><div class="info-row"><span class="muted">源代码</span><button class="link-button" data-action="open-source">github.com/micky-meecky/Pierdesk</button></div></div><p class="muted small">${svg('lock')} 文件与输入只在已配对设备之间通过局域网传输</p></article></div>${currentModel().licenseEnabled ? `<article class="card about-support"><div class="about-support-copy"><h2>永久授权 · 一码一机</h2><p>在激活与授权中管理当前电脑的使用授权。</p></div><button class="button" data-page="license">${svg('lock')}激活与授权</button></article>` : `<article class="card about-support"><div class="about-support-copy"><h2>支持完全自愿</h2><p>Pierdesk 的所有核心功能都会保持免费开放。</p></div><button class="button" data-page="support">${svg('heart')}前往支持作者</button></article>`}<article class="card quote">“ 跨过屏幕边界，继续手头的工作。 ”</article>`;
+    }
+
+    function renderModal(modal) {
+      if (modal.type === 'license-release') return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true"><h2>${licenseText('解绑本机？','Release this PC?')}</h2><p>${licenseText('请先保存激活码。解绑会停止本机跨屏、剪贴板同步与文件传输；之后可在新电脑使用原码激活。','Save your original code first. Release stops cross-screen, clipboard and file-transfer services on this PC. You can then activate another PC.')}</p><div class="modal-actions"><button class="button" data-action="close-modal">${licenseText('取消','Cancel')}</button><button class="button danger" data-license="confirm-release">${licenseText('确认解绑','Confirm release')}</button></div></section></div>`;
+      if (modal.type.startsWith('ssh-')) return renderSshModal(modal);
+      if (modal.type === 'support-qr') {
+        const wechat = modal.provider === 'wechat';
+        return `<div class="modal-backdrop" role="presentation"><section class="modal support-qr-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">${wechat?'微信支付':'支付宝'} · 感谢支持</h2><p>使用手机扫描下方二维码；金额由你决定。</p><img class="support-qr-large" src="${wechat?'__WECHAT_SUPPORT_QR__':'__ALIPAY_SUPPORT_QR__'}" alt="${wechat?'微信支付 / WeChat Pay':'支付宝 / Alipay'} 二维码"><div class="modal-actions"><button class="button primary" data-action="close-modal">关闭</button></div></section></div>`;
+      }
+      if (modal.type === 'boundary-advanced') {
+        return `<div class="modal-backdrop" role="presentation"><section class="modal wide boundary-advanced-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="boundary-advanced-modal-head"><div><h2 id="modal-title">高级设置</h2><p>当前运行设置会继续控制实际跨屏行为。</p></div><button class="button" data-action="close-modal">关闭</button></div>${boundaryRuntimeSettingsMarkup(currentModel().cross)}</section></div>`;
+      }
+      if (modal.type === 'compatibility') {
+        return `<div class="modal-backdrop" role="presentation"><section class="modal wide" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">跨屏控制兼容性说明</h2><div class="modal-section"><h3>权限边界</h3><p>普通权限运行时不能控制管理员权限窗口。以管理员身份运行可覆盖大多数桌面应用，但 Windows 的 UAC 安全桌面、登录界面与 Ctrl+Alt+Del 始终不会被接管。</p></div><div class="modal-section"><h3>应用兼容性</h3><p>跨屏控制面向常规 Windows 桌面应用。游戏、反作弊程序、Raw Input、独占全屏、远程桌面或其他主动拦截输入的软件不在兼容优化范围内。</p></div><div class="modal-section"><h3>连接与文件</h3><p>屏幕布局通过已配对的双向 TLS 通道自动同步；四角保护范围仅影响本机越界。跨设备文件移动继续使用 Pierdesk 文件剪贴板与独立传输中心。</p></div><div class="modal-actions"><button class="button primary" data-action="close-modal">知道了</button></div></section></div>`;
+      }
+      const content = modal.type === 'revoke' ? { title: `取消配对“${escapeHtml(modal.label)}”？`, body: '请先在远程工作中撤销该设备的 SSH 授权。取消配对后需要重新核对验证码才能恢复连接。', action: 'confirm-revoke', button: '取消配对' } : modal.type === 'cancel-all' ? { title: '取消全部传输？', body: '所有正在等待、接收或暂停的任务都会被取消。', action: 'confirm-cancel-all', button: '全部取消' } : { title: '退出 Pierdesk？', body: '跨屏控制、剪贴板同步和传输服务将停止。SSH 服务和已有授权会保留。', action: 'confirm-exit', button: '退出程序' };
+      return `<div class="modal-backdrop" role="presentation"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><h2 id="modal-title">${content.title}</h2><p>${content.body}</p><div class="modal-actions"><button class="button" data-action="close-modal">返回</button><button class="button danger" data-action="${content.action}" data-fingerprint="${escapeHtml(modal.fingerprint || '')}">${content.button}</button></div></section></div>`;
+    }
+
+    function rememberScroll() {
+      const content = document.querySelector('.content');
+      if (content && state.scrollResetPage !== state.page) state.scrollByPage[state.page] = content.scrollTop;
+    }
+    function hasActiveTextSelection() {
+      const selection = window.getSelection?.();
+      const root = document.getElementById('root');
+      return Boolean(selection && !selection.isCollapsed && selection.toString() && root.contains(selection.anchorNode) && root.contains(selection.focusNode));
+    }
+    function hasEditableFocus() { return document.activeElement?.matches('input,select,textarea,[contenteditable="true"]') === true; }
+    function shouldDeferModelRender() {
+      const liveSshModal = state.modal && ['ssh-local','ssh-waiting'].includes(state.modal.type);
+      return state.interacting || hasEditableFocus() || hasActiveTextSelection() || Boolean(state.modal && !liveSshModal);
+    }
+    function flushDeferredModel() {
+      if (!state.modelDirty || shouldDeferModelRender()) return;
+      state.modelDirty = false;
+      render();
+    }
+    function render() {
+      rememberScroll();
+      state.modelDirty = false;
+      if (!visiblePages().some(([key]) => key === state.page)) state.page = 'status';
+      const renderer = { status:renderStatus, devices:renderDevices, cross:renderCross, clipboard:renderClipboard, transfer:renderTransfer, connection:renderConnection, general:renderGeneral, license:renderLicense, support:renderSupport, about:renderAbout, remote:renderRemote }[state.page] || renderStatus;
+      document.getElementById('root').innerHTML = shell(renderer());
+      const fontScale = document.getElementById('font-scale');
+      if (fontScale) {
+        const value = clamp(currentModel().fontScale || 100, 50, 125);
+        fontScale.min = '50';
+        fontScale.value = String(value);
+        document.getElementById('font-scale-output').textContent = `${value}%`;
+      }
+      applyAppearance();
+      localizeDocument();
+      const content = document.querySelector('.content');
+      if (content) {
+        if (state.scrollResetPage === state.page) {
+          state.scrollByPage[state.page] = 0;
+          content.scrollTop = 0;
+          state.scrollResetPage = '';
+        } else content.scrollTop = state.scrollByPage[state.page] || 0;
+      }
+      const modalButton = document.querySelector('.modal button');
+      if (state.modal && modalButton) modalButton.focus();
+    }
+
+    function send(message) {
+      if (window.chrome?.webview) window.chrome.webview.postMessage(message);
+      else if (message.action === 'set-layout') setTimeout(() => applyPreviewCommand(message), 900);
+      else applyPreviewCommand(message);
+    }
+    function applyPreviewCommand(message) {
+      if (message.action.startsWith('window-') || message.action === 'open-log' || message.action === 'open-log-folder' || message.action === 'open-source' || message.action === 'open-transfer') return;
+      if (message.action === 'preview-boundary-workspace-v3') return;
+      const m = currentModel();
+      if (message.action === 'set-cross-enabled') m.cross.enabled = message.enabled;
+      if (message.action === 'set-boundary-map-v2-enabled') m.cross.boundaryMapV2Enabled = message.enabled;
+      if (message.action === 'pause-cross') m.cross.state = '已暂停';
+      if (message.action === 'resume-cross') m.cross.state = '已连接';
+      if (message.action === 'set-placement') m.cross.placement = message.placement;
+      if (message.action === 'set-corner-enabled') m.cross.cornerGuardEnabled = message.enabled;
+      if (message.action === 'set-corner-pixels') m.cross.cornerGuardPixels = message.pixels;
+      if (message.action === 'set-second-push') m.cross.requireSecondPush = message.enabled;
+      if (message.action === 'set-fullscreen-pause') m.cross.pauseOnFullscreen = message.enabled;
+      if (message.action === 'set-keep-link-warm') m.cross.keepLinkWarm = message.enabled;
+      if (message.action === 'save-boundary-map') {
+        m.boundaryMap = boundaryClone(message.boundaryMap);
+        m.boundaryMap.revision = (Number(m.boundaryMap.revision) || 0) + 1;
+        state.boundaryDraft = null;
+        state.boundaryDirty = false;
+        state.boundarySaving = false;
+        state.boundarySaveRevision = null;
+        state.boundaryConflict = null;
+      }
+      if (message.action === 'save-boundary-workspace-v3') {
+        const previous = m.boundaryWorkspaceV3;
+        const draft = boundaryClone(message.boundaryLayout);
+        if (previous) draft.revision = (Number(draft.revision) || 0) + 1;
+        m.boundaryWorkspaceV3 = {
+          schemaVersion: 3,
+          storageRevision: previous ? (Number(previous.storageRevision) || 0) + 1 : 0,
+          draft,
+          applied: previous?.applied || null
+        };
+        m.boundaryWorkspaceV3Applied = Boolean(m.boundaryWorkspaceV3.applied && !m.boundaryWorkspaceV3.draft.boundaries.some(boundary => boundary.localConfirmedRevision !== boundary.mappingRevision || boundary.peerConfirmedRevision !== boundary.mappingRevision));
+        const editor = boundaryV3State();
+        const savedMessage = editor.message;
+        const completeAfterSave = editor.completeAfterSave;
+        boundaryV3LoadModel(m, false, completeAfterSave);
+        boundaryV3State().completeAfterSave = false;
+        boundaryV3State().message = savedMessage;
+      }
+      if (message.action === 'apply-boundary-workspace-v3' && m.boundaryWorkspaceV3) {
+        m.boundaryWorkspaceV3.applied = { layout: boundaryClone(m.boundaryWorkspaceV3.draft), cornerGuardPixels: 32, minimumPortalPixels: 64 };
+        m.boundaryWorkspaceV3.storageRevision += 1;
+        m.boundaryWorkspaceV3Applied = true;
+        boundaryV3LoadModel(m);
+      }
+      if (message.action === 'accept-boundary-workspace-preview' && m.boundaryRemoteWorkspace?.layout) {
+        const draft=boundaryClone(m.boundaryRemoteWorkspace.layout);
+        draft.boundaries.forEach(boundary=>boundary.localConfirmedRevision=boundary.mappingRevision);
+        m.boundaryWorkspaceV3={schemaVersion:3,storageRevision:Number(m.boundaryWorkspaceV3?.storageRevision||-1)+1,draft,applied:m.boundaryWorkspaceV3?.applied||null};
+        if(draft.boundaries.length&&draft.boundaries.every(boundary=>boundary.localConfirmedRevision===boundary.mappingRevision&&boundary.peerConfirmedRevision===boundary.mappingRevision)){
+          m.boundaryWorkspaceV3.applied={layout:boundaryClone(draft),cornerGuardPixels:32,minimumPortalPixels:64};
+          m.boundaryWorkspaceV3.storageRevision+=1;
+          m.boundaryWorkspaceV3Applied=true;
+        }
+        m.boundaryRemoteWorkspace=null;
+        boundaryV3LoadModel(m);
+      }
+      if (message.action === 'set-shared-enabled') m.shared.enabled = message.enabled;
+      if (message.action === 'set-auto-popup') m.transfer.autoPopup = message.enabled;
+      if (message.action === 'set-history-limit') m.transfer.historyLimit = message.value;
+      if (message.action === 'set-row-height') m.transfer.rowHeight = message.value;
+      if (message.action === 'set-autostart') m.autostart = message.enabled;
+      if (message.action === 'set-language') m.language = message.language;
+      if (message.action === 'set-theme') m.theme = message.theme;
+      if (message.action === 'set-font-scale') m.fontScale = message.value;
+      if (message.action === 'select-peer' || message.action === 'set-layout') {
+        m.peers.forEach(peer => peer.current = peer.fingerprint === message.fingerprint);
+        const selected = m.peers.find(peer => peer.current);
+        if (selected) { m.peerLabel = selected.label; m.connection.activePeer = selected.fingerprint; m.connection.peerEndpoint = selected.endpoint; }
+      }
+      if (message.action === 'set-layout') m.cross.placement = message.placement;
+      if (message.action === 'pair') { const device = m.discovered.find(item => item.fingerprint === message.fingerprint); if (device) { m.pairing = {fingerprint:device.fingerprint,label:device.label,code:'481 275'}; m.pairingMessage = `请在两台设备上核对验证码，然后确认是否配对“${device.label}”`; } }
+      if (message.action === 'approve-pairing' || message.action === 'reject-pairing') { m.pairing = null; m.pairingMessage = message.action === 'approve-pairing' ? '已批准，正在等待另一台设备确认…' : '已拒绝配对请求'; }
+      if (message.action === 'revoke') m.peers = m.peers.filter(p => p.fingerprint !== message.fingerprint);
+      if (message.action === 'save-connection') { m.connection = {...m.connection,...message,configured:true,valid:true}; state.connectionDraft = null; }
+      if (pendingLayoutMatches(m)) clearPendingLayout();
+      showToast('预览状态已更新');
+      render();
+    }
+    function showToast(message, options = {}) {
+      const toast = document.getElementById('toast');
+      let translated = message;
+      if (currentModel().language === 'en') {
+        if (String(message).startsWith('操作未完成：')) {
+          const detail = translateText(String(message).slice('操作未完成：'.length).trim());
+          translated = `Could not complete: ${/\p{Script=Han}/u.test(detail) ? runtimeErrorText(detail) : detail}`;
+        } else translated = translateText(message);
+      }
+      toast.textContent = translated;
+      toast.classList.toggle('top', options.placement === 'top');
+      toast.classList.toggle('success', options.tone === 'success');
+      toast.classList.add('show');
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toast.classList.remove('show'), options.duration || 1800);
+    }
+    function navigate(page) { if (!visiblePages().some(([key]) => key === page)) return; rememberScroll(); state.page = page; state.modal = null; render(); }
+
+    document.addEventListener('pointerdown', event => {
+      const edge = event.target.closest('[data-edge]')?.dataset.edge;
+      if (edge) { event.preventDefault(); send({action:'window-resize',edge}); return; }
+      if (event.target.closest('[data-drag-region]') && !event.target.closest('button,select,input,a')) {
+        event.preventDefault(); send({action:'window-drag'}); return;
+      }
+      state.interacting = true;
+    }, true);
+    document.addEventListener('pointerup', () => {
+      state.interacting = false;
+      if (state.modelDirty) setTimeout(flushDeferredModel, 160);
+    }, true);
+    document.addEventListener('selectionchange', () => {
+      clearTimeout(state.selectionTimer);
+      if (!hasActiveTextSelection()) state.selectionTimer = setTimeout(flushDeferredModel, 220);
+    });
+    document.addEventListener('focusout', () => setTimeout(flushDeferredModel, 120), true);
+    document.addEventListener('scroll', event => {
+      if (event.target.classList?.contains('content')) state.scrollByPage[state.page] = event.target.scrollTop;
+    }, true);
+
+    document.addEventListener('click', event => {
+      const page = event.target.closest('[data-page]')?.dataset.page;
+      if (page) { navigate(page); return; }
+      const copy = event.target.closest('[data-copy]');
+      if (copy) { copyText(copy.dataset.copy); return; }
+      const windowAction = event.target.closest('[data-window]')?.dataset.window;
+      if (windowAction) { send({action:`window-${windowAction}`}); return; }
+      const confirm = event.target.closest('[data-confirm]');
+      if (confirm && !confirm.disabled) { state.modal = { type: confirm.dataset.confirm, fingerprint: confirm.dataset.fingerprint, label: confirm.dataset.label }; render(); return; }
+      const placement = event.target.closest('[data-placement]')?.dataset.placement;
+      if (placement) { send({action:'set-placement',placement}); return; }
+      const step = event.target.closest('[data-step]');
+      if (step) {
+        const m = currentModel(), delta = Number(step.dataset.delta), kind = step.dataset.step;
+        if (kind === 'history') {
+          const input = document.getElementById('history-limit');
+          const base = Number(input?.value) || m.transfer.historyLimit;
+          const value = clamp(base + delta, 1, 500);
+          m.transfer.historyLimit = value;
+          send({action:'set-history-limit', value});
+        }
+        else send({action:'set-row-height', value:Math.max(64,Math.min(96,m.transfer.rowHeight + delta * 4))});
+        return;
+      }
+      const target = event.target.closest('[data-action]');
+      if (!target || target.disabled) return;
+      const action = target.dataset.action;
+      const m = currentModel();
+      const map = {
+        refresh: {action:'refresh'}, 'open-log':{action:'open-log'}, 'open-log-folder':{action:'open-log-folder'}, 'open-source':{action:'open-source'}, 'open-transfer':{action:'open-transfer'}, 'open-transfer-history':{action:'open-transfer',history:true},
+        'pause-all':{action:'pause-all'}, 'resume-all':{action:'resume-all'}, 'accept-pending':{action:'accept-pending'},
+        'pause-cross':{action:'pause-cross'}, 'resume-cross':{action:'resume-cross'}, 'return-local':{action:'return-local'}, 'restart-admin':{action:'restart-admin'},
+        'approve-pairing':{action:'approve-pairing'}, 'reject-pairing':{action:'reject-pairing'}
+      };
+      if (action === 'toggle-cross') send({action:'set-cross-enabled',enabled:!m.cross.enabled});
+      else if (action === 'toggle-pair') {
+        const fingerprint = target.dataset.fingerprint;
+        const row = (m.pairSwitches || []).find(item => item.fingerprint === fingerprint);
+        if (row) {
+          row.enabled = !row.enabled;
+          render();
+          send({action:'set-pair-enabled', fingerprint, enabled: row.enabled});
+        }
+      }
+      else if (action === 'toggle-boundary-map-v2') {
+        const enabled = m.cross.boundaryMapV2Enabled === false;
+        m.cross.boundaryMapV2Enabled = enabled;
+        if (state.modal?.type === 'boundary-advanced') render();
+        send({action:'set-boundary-map-v2-enabled',enabled});
+      }
+      else if (action === 'toggle-corner') {
+        const enabled = !m.cross.cornerGuardEnabled;
+        m.cross.cornerGuardEnabled = enabled;
+        if (state.modal?.type === 'boundary-advanced') render();
+        send({action:'set-corner-enabled',enabled});
+      }
+      else if (action === 'toggle-second-push') {
+        const enabled = !m.cross.requireSecondPush;
+        m.cross.requireSecondPush = enabled;
+        if (state.modal?.type === 'boundary-advanced') render();
+        send({action:'set-second-push',enabled});
+      }
+      else if (action === 'toggle-fullscreen') {
+        const enabled = !m.cross.pauseOnFullscreen;
+        m.cross.pauseOnFullscreen = enabled;
+        if (state.modal?.type === 'boundary-advanced') render();
+        send({action:'set-fullscreen-pause',enabled});
+      }
+      else if (action === 'toggle-keep-link-warm') {
+        const enabled = m.cross.keepLinkWarm === false;
+        m.cross.keepLinkWarm = enabled;
+        if (state.modal?.type === 'boundary-advanced') render();
+        send({action:'set-keep-link-warm',enabled});
+      }
+      else if (action === 'toggle-shared') send({action:'set-shared-enabled',enabled:!m.shared.enabled});
+      else if (action === 'screenshot') send({action:'screenshot'});
+      else if (action === 'screenshot-hotkey-save') send({action:'set-screenshot-shortcut',shortcut:document.getElementById('screenshot-shortcut').value.trim()});
+      else if (action === 'toggle-auto-popup') send({action:'set-auto-popup',enabled:!m.transfer.autoPopup});
+      else if (action === 'toggle-autostart') send({action:'set-autostart',enabled:!m.autostart});
+      else if (action === 'toggle-theme') {
+        m.theme = m.theme === 'dark' ? 'light' : 'dark';
+        applyAppearance();
+        render();
+        send({action:'set-theme',theme:m.theme});
+      }
+      else if (action === 'draft-auto-receive') { state.connectionDraft = state.connectionDraft || {...m.connection}; state.connectionDraft.autoReceive = !state.connectionDraft.autoReceive; render(); }
+      else if (action === 'discard-connection') { state.connectionDraft = null; render(); }
+      else if (action === 'pair') send({action:'pair',fingerprint:target.dataset.fingerprint});
+      else if (action === 'select-peer') send({action:'select-peer',fingerprint:target.dataset.fingerprint});
+      else if (action === 'boundary-advanced-settings') { state.modal = {type:'boundary-advanced'}; render(); }
+      else if (action === 'compatibility') { state.modal = {type:'compatibility'}; render(); }
+      else if (action === 'support-qr') { state.modal = {type:'support-qr',provider:target.dataset.provider}; render(); }
+      else if (action === 'pause-task' || action === 'cancel-task') send({action,task:target.dataset.task});
+      else if (action === 'close-modal') { state.modal = null; render(); }
+      else if (action === 'confirm-revoke') { state.modal = null; send({action:'revoke',fingerprint:target.dataset.fingerprint}); }
+      else if (action === 'confirm-cancel-all') { state.modal = null; send({action:'cancel-all'}); }
+      else if (action === 'confirm-exit') { state.modal = null; send({action:'exit'}); }
+      else if (map[action]) send(map[action]);
+    });
+
+    document.addEventListener('input', event => {
+      if (event.target.id === 'corner-range') { document.getElementById('corner-output').textContent = `${event.target.value} 像素`; }
+      if (event.target.id === 'font-scale') {
+        const value = clamp(event.target.value, 50, 125);
+        currentModel().fontScale = value;
+        document.getElementById('font-scale-output').textContent = `${value}%`;
+        applyAppearance();
+      }
+      if (event.target.matches('#local-endpoint,#peer-endpoint,#active-peer')) {
+        const m = currentModel(); state.connectionDraft = state.connectionDraft || {...m.connection};
+        state.connectionDraft.localEndpoint = document.getElementById('local-endpoint')?.value || '';
+        state.connectionDraft.peerEndpoint = document.getElementById('peer-endpoint')?.value || '';
+        state.connectionDraft.activePeer = document.getElementById('active-peer')?.value || '';
+      }
+    });
+    document.addEventListener('keydown', event => {
+      if(event.target.id!=='screenshot-shortcut'||!(event.ctrlKey||event.altKey)||event.metaKey)return;
+      const key=/^Key[A-Z]$/.test(event.code)?event.code.slice(3):/^F([1-9]|10|11)$/.test(event.key)?event.key:null;
+      if(!key)return;event.preventDefault();event.stopPropagation();
+      event.target.value=[event.ctrlKey?'Ctrl':null,event.altKey?'Alt':null,event.shiftKey?'Shift':null,key].filter(Boolean).join('+');
+    });
+    document.addEventListener('change', event => {
+      if (event.target.id === 'corner-range') {
+        const pixels = Number(event.target.value);
+        currentModel().cross.cornerGuardPixels = pixels;
+        send({action:'set-corner-pixels',pixels});
+      }
+      if (event.target.id === 'ui-language') { currentModel().language = event.target.value; send({action:'set-language',language:event.target.value}); render(); }
+      if (event.target.id === 'font-scale') {
+        const value = Math.round(clamp(event.target.value,50,125) / 5) * 5;
+        currentModel().fontScale = value;
+        send({action:'set-font-scale',value});
+        if (window.chrome?.webview) render();
+      }
+      if (event.target.id === 'history-limit') {
+        const value = Math.round(clamp(event.target.value || currentModel().transfer.historyLimit,1,500));
+        event.target.value = value;
+        currentModel().transfer.historyLimit = value;
+        send({action:'set-history-limit',value});
+      }
+    });
+    document.addEventListener('keydown', event => {
+      if (event.target.id === 'history-limit' && event.key === 'Enter') {
+        event.preventDefault();
+        event.target.blur();
+      }
+    });
+
+    document.addEventListener('dragstart', event => {
+      const peer = event.target.closest('[data-peer-drag]');
+      if (!peer) return;
+      if (peer.getAttribute('draggable') === 'false') { event.preventDefault(); return; }
+      state.draggedPeer = peer.dataset.peerDrag;
+      state.interacting = true;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', state.draggedPeer);
+    });
+    document.addEventListener('dragover', event => {
+      const slot = event.target.closest('[data-layout-drop]');
+      if (!slot || !state.draggedPeer) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      slot.classList.add('drag-over');
+    });
+    document.addEventListener('dragleave', event => event.target.closest('[data-layout-drop]')?.classList.remove('drag-over'));
+    document.addEventListener('drop', event => {
+      const slot = event.target.closest('[data-layout-drop]');
+      if (!slot) return;
+      event.preventDefault();
+      const fingerprint = event.dataTransfer.getData('text/plain') || state.draggedPeer;
+      slot.classList.remove('drag-over');
+      const placement = slot.dataset.layoutDrop;
+      const current = (currentModel().peers || []).find(peer => peer.current);
+      const unchanged = current?.fingerprint === fingerprint && currentModel().cross.placement === placement;
+      if (fingerprint && !unchanged) {
+        beginPendingLayout(fingerprint, placement);
+        render();
+        send({action:'set-layout',fingerprint,placement});
+      }
+      state.draggedPeer = '';
+      state.interacting = false;
+    });
+    document.addEventListener('dragend', () => { state.draggedPeer = ''; state.interacting = false; document.querySelectorAll('.drag-over').forEach(node=>node.classList.remove('drag-over')); });
+    document.addEventListener('submit', event => {
+      if (event.target.id !== 'connection-form') return;
+      event.preventDefault();
+      const m = currentModel(), draft = state.connectionDraft || {...m.connection};
+      draft.localEndpoint = document.getElementById('local-endpoint').value.trim();
+      draft.peerEndpoint = document.getElementById('peer-endpoint').value.trim();
+      draft.activePeer = document.getElementById('active-peer').value;
+      send({action:'save-connection',activePeer:draft.activePeer,localEndpoint:draft.localEndpoint,peerEndpoint:draft.peerEndpoint,autoReceive:draft.autoReceive});
+    });
+
+    /*__BOUNDARY_EDITOR_JS__*/
+    /*__SSH_JS__*/
+    /*__LICENSE_JS__*/
+    window.addEventListener('message', event => {
+      if (!event.data || typeof event.data !== 'object') return;
+      if (event.data.type === 'model') {
+        if (pendingLayoutMatches(event.data)) clearPendingLayout();
+        acceptBoundaryModel(event.data);
+        recordStatusTelemetry(event.data);
+        state.model = event.data;
+        const sshState=event.data.ssh;
+        let forceSshRender=false,sshTestSucceeded=false;
+        if (state.sshSubmitting && sshState && (sshState.busy || sshState.operation)) state.sshSubmitting='';
+        if (state.sshPendingTest && sshState) {
+          const pendingTest=state.sshPendingTest;
+          if (sshState.busy && sshState.operation==='test') pendingTest.started=true;
+          const tested=Number(sshState.data?.outgoing?.find(connection=>connection.id===pendingTest.id)?.tested||0);
+          if (!sshState.busy && sshState.operation==='test' && !sshState.error && tested>pendingTest.previousTested) {
+            state.sshPendingTest=null;
+            forceSshRender=true;
+            sshTestSucceeded=true;
+          } else if (!sshState.busy && pendingTest.started && sshState.operation==='test' && sshState.error) state.sshPendingTest=null;
+        }
+        if (state.sshReturnReview && sshState && !sshState.busy && sshLocalConfigured(sshState.server)) {
+          state.modal={type:'ssh-review',id:state.sshReturnReview};state.sshReturnReview='';
+          forceSshRender=true;
+        }
+        if (state.sshWaitingPeer) {
+          const c=sshOut(state.sshWaitingPeer);
+          if(c && sshActive(c.status)){state.modal={type:'ssh-waiting',id:c.id};state.sshWaitingPeer='';}
+        }
+        applyAppearance();
+        if (forceSshRender) render();
+        else if (shouldDeferModelRender()) state.modelDirty = true;
+        else render();
+        if (sshTestSucceeded) showToast(sshText('SSH 连接测试成功','SSH connection test succeeded'),{placement:'top',tone:'success',duration:2600});
+      } else if (event.data.type === 'navigate') navigate(event.data.page);
+      else if (event.data.type === 'boundary-graph-state') {
+        const editor=boundaryV3State(),positions=event.data.positions&&typeof event.data.positions==='object'?event.data.positions:{};
+        editor.graphStoredPositions=positions;
+        if(!editor.graphDrag){editor.graphPositions=boundaryV3GraphPositions();editor.graphAnchors=Object.fromEntries(Object.entries(editor.graphPositions).map(([id,point])=>[id,{x:point.x,y:point.y}]));editor.graphVelocity={};if(state.page==='cross'&&editor.view==='boundary')render();}
+      }
+      else if (event.data.type === 'boundary-save-result') {
+        const changed = event.data.success ? boundarySaveSucceeded() : boundarySaveFailed();
+        if (changed) render();
+        showToast(event.data.message, event.data.success ? {tone:'success'} : {});
+      }
+      else if (event.data.type === 'toast') {
+        if (String(event.data.message || '').startsWith('操作未完成：')) {
+          const layoutCleared = clearPendingLayout();
+          const boundaryCleared = boundarySaveFailed();
+          if (layoutCleared || boundaryCleared) render();
+        }
+        showToast(event.data.message);
+      }
+    });
+    if (window.chrome?.webview) {
+      window.chrome.webview.addEventListener('message', event => window.dispatchEvent(new MessageEvent('message',{data:event.data})));
+      window.chrome.webview.postMessage({action:'ready'});
+    } else {
+      state.model = structuredClone(demoModel);
+      recordStatusTelemetry(state.model);
+      const requested = new URLSearchParams(location.search).get('page');
+      if (requested && visiblePages().some(([key]) => key === requested)) state.page = requested;
+      render();
+    }
+
+    async function copyText(value) {
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch (_) {
+        const area = document.createElement('textarea'); area.value = value; area.style.position = 'fixed'; area.style.opacity = '0'; document.body.append(area); area.select(); document.execCommand('copy'); area.remove();
+      }
+      showToast(currentModel().language === 'en' ? 'Device code copied' : '完整设备码已复制');
+    }
+  </script>
+</body>
+</html>

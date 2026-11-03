@@ -1,0 +1,4957 @@
+use std::collections::HashMap;
+use std::io;
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use windows::Win32::Foundation::{
+    E_ACCESSDENIED, E_INVALIDARG, ERROR_CANCELLED, ERROR_READ_FAULT, ERROR_TIMEOUT, FILETIME,
+};
+use windows::core::{Error, HRESULT, Result};
+
+use crate::device_store::DeviceStore;
+use crate::security::{
+    AuthenticatedServerConnection, CertificateFingerprint, PinnedTlsClient, PinnedTlsServer,
+    TrustedTlsServer,
+};
+
+use super::data_object::{
+    MAX_VIRTUAL_ITEMS, VirtualFileDescriptor, validate_virtual_descriptor_tree,
+};
+use super::local_file::LocalFileOffer;
+use super::source::ReadAtSource;
+use super::transfer::{GeneratedSource, TransferControl};
+
+const MAGIC: [u8; 4] = *b"CFS4";
+const PROTOCOL_VERSION: u16 = 3;
+const FRAME_HEADER_LEN: usize = 20;
+const MANIFEST_HEADER_LEN: usize = 33;
+const MANIFEST_ENTRY_FIXED_LEN: usize = 55;
+const MAX_SOURCE_LOCATION_BYTES: usize = 64 * 1024;
+pub(crate) const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+
+pub const MAX_SECURE_RANGE_BYTES: usize = 256 * 1024;
+pub const MAX_SECURE_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_FRAME_PAYLOAD: usize = MAX_SECURE_MANIFEST_BYTES;
+const MAX_ACTIVE_TRANSFERS: usize = 64;
+const MAX_BEGIN_NONCES: usize = 4_096;
+const MAX_TRACKED_RANGES: usize = 4_096;
+const DEFAULT_MAX_WORKERS: usize = 32;
+const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
+const HELLO_ROLE_RECEIVER: u8 = 1;
+const RESPONSE_BIT: u16 = 0x8000;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ProtocolId([u8; 16]);
+
+impl ProtocolId {
+    fn random() -> io::Result<Self> {
+        Ok(Self(random_bytes()?))
+    }
+
+    #[must_use]
+    pub fn bytes(self) -> [u8; 16] {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ProtocolId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OfferManifest {
+    pub offer_id: ProtocolId,
+    pub entries: Arc<[OfferManifestEntry]>,
+    pub ttl: Duration,
+    pub source_location: Arc<str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OfferManifestEntry {
+    pub file_id: ProtocolId,
+    pub descriptor: VirtualFileDescriptor,
+}
+
+impl OfferManifest {
+    pub(crate) fn origin_payload(&self) -> Arc<[u8]> {
+        let mut payload = Vec::with_capacity(PierdeskOrigin::PREFIX.len() + 16);
+        payload.extend_from_slice(PierdeskOrigin::PREFIX);
+        payload.extend_from_slice(&self.offer_id.0);
+        Arc::from(payload)
+    }
+}
+
+struct PierdeskOrigin;
+
+impl PierdeskOrigin {
+    const PREFIX: &'static [u8] = b"ClipFerry.SourceOffer.v1\0";
+}
+
+#[derive(Clone)]
+pub struct SecureOfferedFile {
+    drag_image: Arc<[u8]>,
+    manifest: OfferManifest,
+    sources: Arc<HashMap<ProtocolId, Arc<dyn ReadAtSource>>>,
+    expires_at: Instant,
+}
+
+impl SecureOfferedFile {
+    /// Creates an immutable, short-lived offered file backed by a deferred random-access source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid name, size mismatch, zero lifetime, or unavailable secure
+    /// randomness.
+    pub fn new(
+        descriptor: VirtualFileDescriptor,
+        source: Arc<dyn ReadAtSource>,
+        ttl: Duration,
+    ) -> io::Result<Self> {
+        Self::new_tree(vec![(descriptor, Some(source))], ttl)
+    }
+
+    /// Creates one bounded virtual directory tree. Directory descriptors have no source; every
+    /// ordinary file has an independent deferred random-access source and protocol identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid descriptors, missing or mismatched sources, excessive tree
+    /// size, zero lifetime, arithmetic overflow, or unavailable secure randomness.
+    pub fn new_tree(
+        entries: Vec<(VirtualFileDescriptor, Option<Arc<dyn ReadAtSource>>)>,
+        ttl: Duration,
+    ) -> io::Result<Self> {
+        if ttl.is_zero() || entries.is_empty() || entries.len() > MAX_VIRTUAL_ITEMS {
+            return Err(invalid_data("invalid secure offer size or lifetime"));
+        }
+        let descriptors: Vec<VirtualFileDescriptor> = entries
+            .iter()
+            .map(|(descriptor, _)| descriptor.clone())
+            .collect();
+        validate_virtual_descriptor_tree(&descriptors).map_err(invalid_windows)?;
+        let offer_id = ProtocolId::random()?;
+        let mut manifest_entries = Vec::with_capacity(entries.len());
+        let mut sources = HashMap::with_capacity(entries.len());
+        for (descriptor, source) in entries {
+            if descriptor.is_directory() != source.is_none()
+                || source
+                    .as_ref()
+                    .is_some_and(|source| descriptor.size != source.len())
+            {
+                return Err(invalid_data(
+                    "secure offer source does not match descriptor",
+                ));
+            }
+            let file_id = ProtocolId::random()?;
+            if let Some(source) = source {
+                sources.insert(file_id, source);
+            }
+            manifest_entries.push(OfferManifestEntry {
+                file_id,
+                descriptor,
+            });
+        }
+        let expires_at = Instant::now()
+            .checked_add(ttl)
+            .ok_or_else(|| invalid_data("secure offer lifetime is too large"))?;
+        Ok(Self {
+            manifest: OfferManifest {
+                offer_id,
+                entries: Arc::from(manifest_entries),
+                ttl,
+                source_location: Arc::from(""),
+            },
+            sources: Arc::new(sources),
+            drag_image: Arc::from([]),
+            expires_at,
+        })
+    }
+
+    /// Creates a deterministic generated-data offer for security and transport tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid arguments or unavailable secure randomness.
+    pub fn generated(file_name: Arc<str>, size: u64, ttl: Duration) -> io::Result<Self> {
+        let control = Arc::new(TransferControl::default());
+        let source: Arc<dyn ReadAtSource> = Arc::new(
+            GeneratedSource::new(size, MAX_SECURE_RANGE_BYTES, Duration::ZERO, control)
+                .map_err(invalid_windows)?,
+        );
+        Self::new(VirtualFileDescriptor::basic(file_name, size), source, ttl)
+    }
+
+    pub(crate) fn from_local_offer(offer: &LocalFileOffer) -> io::Result<Self> {
+        let mut source_directories = Vec::new();
+        for entry in offer
+            .entries()
+            .iter()
+            .filter(|entry| !entry.descriptor().file_name.contains('\\'))
+        {
+            let directory = entry
+                .source_path()
+                .parent()
+                .unwrap_or_else(|| entry.source_path())
+                .to_string_lossy()
+                .into_owned();
+            if !source_directories.contains(&directory) {
+                source_directories.push(directory);
+            }
+        }
+        let source_location = source_directories.join("；");
+        let entries = offer
+            .entries()
+            .iter()
+            .map(|entry| {
+                let source = entry.source().map(|source| {
+                    let source: Arc<dyn ReadAtSource> = source.transfer_source();
+                    source
+                });
+                (entry.descriptor(), source)
+            })
+            .collect();
+        Self::new_tree(entries, offer.remaining_ttl())?.with_source_location(source_location)
+    }
+
+    pub(crate) fn with_source_location(mut self, location: String) -> io::Result<Self> {
+        if location.len() > MAX_SOURCE_LOCATION_BYTES
+            || location.chars().any(|character| character == '\0')
+        {
+            return Err(invalid_data("invalid source location"));
+        }
+        self.manifest.source_location = Arc::from(location);
+        Ok(self)
+    }
+
+    pub(crate) fn with_drag_image(mut self, image: Vec<u8>) -> io::Result<Self> {
+        super::drag_image::validate(&image)?;
+        self.drag_image = Arc::from(image);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn manifest(&self) -> OfferManifest {
+        let mut manifest = self.manifest.clone();
+        manifest.ttl = self.expires_at.saturating_duration_since(Instant::now());
+        manifest
+    }
+
+    fn source(&self, file_id: ProtocolId) -> Option<Arc<dyn ReadAtSource>> {
+        self.sources.get(&file_id).cloned()
+    }
+
+    fn manifest_entry(&self, file_id: ProtocolId) -> Option<&OfferManifestEntry> {
+        self.manifest
+            .entries
+            .iter()
+            .find(|entry| entry.file_id == file_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteTransferState {
+    Running,
+    Paused,
+    Cancelled,
+    Completed,
+}
+
+impl RemoteTransferState {
+    fn encode(self) -> u8 {
+        match self {
+            Self::Running => 0,
+            Self::Paused => 1,
+            Self::Cancelled => 2,
+            Self::Completed => 3,
+        }
+    }
+
+    fn decode(value: u8) -> io::Result<Self> {
+        match value {
+            0 => Ok(Self::Running),
+            1 => Ok(Self::Paused),
+            2 => Ok(Self::Cancelled),
+            3 => Ok(Self::Completed),
+            _ => Err(invalid_data("invalid transfer state")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SecureMetricsSnapshot {
+    pub accepted_connections: u64,
+    pub tls_failures: u64,
+    pub protocol_errors: u64,
+    pub denied_requests: u64,
+    pub replayed_requests: u64,
+    pub begun_transfers: u64,
+    pub read_requests: u64,
+    pub served_bytes: u64,
+    pub unique_bytes: u64,
+    pub cancelled_transfers: u64,
+    pub active_reads: u64,
+    pub max_concurrent_reads: u64,
+    pub source_paused: bool,
+    pub source_cancelled: bool,
+}
+
+#[derive(Default)]
+struct SecureMetrics {
+    accepted_connections: AtomicU64,
+    tls_failures: AtomicU64,
+    protocol_errors: AtomicU64,
+    denied_requests: AtomicU64,
+    replayed_requests: AtomicU64,
+    begun_transfers: AtomicU64,
+    read_requests: AtomicU64,
+    served_bytes: AtomicU64,
+    cancelled_transfers: AtomicU64,
+    active_reads: AtomicU64,
+    max_concurrent_reads: AtomicU64,
+}
+
+impl SecureMetrics {
+    fn begin_read(self: &Arc<Self>) -> ActiveRead {
+        let current = self.active_reads.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.max_concurrent_reads.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |maximum| (current > maximum).then_some(current),
+        );
+        ActiveRead {
+            metrics: Arc::clone(self),
+        }
+    }
+
+    fn snapshot(&self, unique_bytes: u64) -> SecureMetricsSnapshot {
+        SecureMetricsSnapshot {
+            accepted_connections: self.accepted_connections.load(Ordering::Relaxed),
+            tls_failures: self.tls_failures.load(Ordering::Relaxed),
+            protocol_errors: self.protocol_errors.load(Ordering::Relaxed),
+            denied_requests: self.denied_requests.load(Ordering::Relaxed),
+            replayed_requests: self.replayed_requests.load(Ordering::Relaxed),
+            begun_transfers: self.begun_transfers.load(Ordering::Relaxed),
+            read_requests: self.read_requests.load(Ordering::Relaxed),
+            served_bytes: self.served_bytes.load(Ordering::Relaxed),
+            unique_bytes,
+            cancelled_transfers: self.cancelled_transfers.load(Ordering::Relaxed),
+            active_reads: self.active_reads.load(Ordering::Relaxed),
+            max_concurrent_reads: self.max_concurrent_reads.load(Ordering::Relaxed),
+            source_paused: false,
+            source_cancelled: false,
+        }
+    }
+}
+
+struct ActiveRead {
+    metrics: Arc<SecureMetrics>,
+}
+
+impl Drop for ActiveRead {
+    fn drop(&mut self) {
+        self.metrics.active_reads.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug, Default)]
+struct RangeCoverage {
+    ranges: Vec<(u64, u64)>,
+    unique_bytes: u64,
+    saturated: bool,
+}
+
+impl RangeCoverage {
+    fn note(&mut self, start: u64, length: u64) {
+        if self.saturated || length == 0 {
+            return;
+        }
+        let Some(end) = start.checked_add(length) else {
+            self.saturated = true;
+            return;
+        };
+        self.ranges.push((start, end));
+        self.ranges.sort_unstable_by_key(|range| range.0);
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(self.ranges.len());
+        for (range_start, range_end) in self.ranges.drain(..) {
+            if let Some(last) = merged.last_mut()
+                && range_start <= last.1
+            {
+                last.1 = last.1.max(range_end);
+                continue;
+            }
+            merged.push((range_start, range_end));
+        }
+        if merged.len() > MAX_TRACKED_RANGES {
+            self.saturated = true;
+            self.ranges.clear();
+            return;
+        }
+        self.unique_bytes = merged.iter().map(|(start, end)| end - start).sum();
+        self.ranges = merged;
+    }
+}
+
+struct TransferInner {
+    state: RemoteTransferState,
+    last_control_sequence: u64,
+    last_control_opcode: Option<Opcode>,
+    coverage: RangeCoverage,
+}
+
+struct TransferSession {
+    authorized_peer: CertificateFingerprint,
+    offer_id: ProtocolId,
+    file_id: ProtocolId,
+    transfer_id: ProtocolId,
+    capability: [u8; 32],
+    server_nonce: [u8; 32],
+    expires_at: Instant,
+    inner: Mutex<TransferInner>,
+    activity: Mutex<Instant>,
+    paused: AtomicBool,
+    changed: Condvar,
+}
+
+impl TransferSession {
+    fn credentials(&self) -> TransferCredentials {
+        TransferCredentials {
+            offer_id: self.offer_id,
+            file_id: self.file_id,
+            transfer_id: self.transfer_id,
+            capability: self.capability,
+            server_nonce: self.server_nonce,
+            expires_at_millis: u64::try_from(
+                self.expires_at
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
+        }
+    }
+}
+
+struct ServerInner {
+    transfers: HashMap<ProtocolId, Arc<TransferSession>>,
+    begin_nonces: HashMap<[u8; 32], BeginTransferRecord>,
+}
+
+struct BeginTransferRecord {
+    authorized_peer: CertificateFingerprint,
+    offer_id: ProtocolId,
+    file_id: ProtocolId,
+    transfer_id: ProtocolId,
+}
+
+/// Authoritative offer gate, controlled locally or by the authenticated receiving device.
+#[derive(Clone)]
+pub(crate) struct SourceTaskControl(Arc<SourceTaskControlInner>);
+struct SourceTaskControlInner {
+    state: std::sync::atomic::AtomicU8,
+    activity: Mutex<Instant>,
+}
+impl Default for SourceTaskControl {
+    fn default() -> Self {
+        Self(Arc::new(SourceTaskControlInner {
+            state: std::sync::atomic::AtomicU8::new(RemoteTransferState::Running.encode()),
+            activity: Mutex::new(Instant::now()),
+        }))
+    }
+}
+impl SourceTaskControl {
+    pub(crate) fn state(&self) -> RemoteTransferState {
+        RemoteTransferState::decode(self.0.state.load(Ordering::Acquire))
+            .unwrap_or(RemoteTransferState::Cancelled)
+    }
+    pub(crate) fn set(&self, state: RemoteTransferState) {
+        if state == RemoteTransferState::Completed {
+            return;
+        }
+        self.touch();
+        let _ = self
+            .0
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                (old != RemoteTransferState::Cancelled.encode()).then_some(state.encode())
+            });
+    }
+    fn touch(&self) {
+        *self
+            .0
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
+    }
+    pub(crate) fn idle_for(&self) -> Duration {
+        self.0
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed()
+    }
+}
+
+struct ServerState {
+    offered: SecureOfferedFile,
+    authorized_peer: CertificateFingerprint,
+    trust_store: Option<DeviceStore>,
+    transfer_ttl: Duration,
+    request_timeout: Duration,
+    inner: Mutex<ServerInner>,
+    metrics: Arc<SecureMetrics>,
+    target_location: Mutex<String>,
+    injected_response_drops: AtomicUsize,
+    source_control: SourceTaskControl,
+}
+
+impl ServerState {
+    fn session_expired(&self, session: &TransferSession, now: Instant) -> bool {
+        if session.paused.load(Ordering::Acquire)
+            || self.source_control.state() == RemoteTransferState::Paused
+        {
+            return false;
+        }
+        let activity = *session
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        now.saturating_duration_since(activity) >= self.transfer_ttl
+            && self.source_control.idle_for() >= self.transfer_ttl
+    }
+
+    fn offer_expired(&self) -> bool {
+        Instant::now() >= self.offered.expires_at
+            && self.source_control.state() != RemoteTransferState::Paused
+            && self.source_control.idle_for() >= self.transfer_ttl
+    }
+
+    fn effective_state(&self, state: RemoteTransferState) -> RemoteTransferState {
+        match (state, self.source_control.state()) {
+            (RemoteTransferState::Completed | RemoteTransferState::Cancelled, _) => state,
+            (_, RemoteTransferState::Cancelled) => RemoteTransferState::Cancelled,
+            (_, RemoteTransferState::Paused) => RemoteTransferState::Paused,
+            _ => state,
+        }
+    }
+
+    fn connection_idle_timeout(&self) -> Duration {
+        self.transfer_ttl.max(self.request_timeout)
+    }
+
+    fn cleanup_expired_sessions(&self, now: Instant) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .transfers
+                .retain(|_, transfer| !self.session_expired(transfer, now));
+            let live = inner
+                .transfers
+                .keys()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            inner
+                .begin_nonces
+                .retain(|_, record| live.contains(&record.transfer_id));
+        }
+    }
+
+    fn begin_transfer(
+        &self,
+        peer: CertificateFingerprint,
+        offer_id: ProtocolId,
+        file_id: ProtocolId,
+        nonce: [u8; 32],
+    ) -> WireResult<TransferCredentials> {
+        self.ensure_peer_allowed(peer)?;
+        if self.source_control.state() == RemoteTransferState::Cancelled {
+            return Err(ResponseStatus::Cancelled);
+        }
+        let now = Instant::now();
+        if offer_id != self.offered.manifest.offer_id || self.offer_expired() {
+            return Err(ResponseStatus::Expired);
+        }
+        if self.offered.source(file_id).is_none() {
+            self.metrics.denied_requests.fetch_add(1, Ordering::Relaxed);
+            return Err(ResponseStatus::Denied);
+        }
+        let mut inner = self.inner.lock().map_err(|_| ResponseStatus::Internal)?;
+        inner
+            .transfers
+            .retain(|_, transfer| !self.session_expired(transfer, now));
+        let live = inner
+            .transfers
+            .keys()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        inner
+            .begin_nonces
+            .retain(|_, record| live.contains(&record.transfer_id));
+        if let Some(record) = inner.begin_nonces.get(&nonce) {
+            if record.authorized_peer == peer
+                && record.offer_id == offer_id
+                && record.file_id == file_id
+                && let Some(session) = inner.transfers.get(&record.transfer_id)
+            {
+                return Ok(session.credentials());
+            }
+            self.metrics
+                .replayed_requests
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ResponseStatus::Replay);
+        }
+        let active_transfers = inner
+            .transfers
+            .values()
+            .filter(|transfer| {
+                transfer.inner.lock().map_or(true, |state| {
+                    matches!(
+                        state.state,
+                        RemoteTransferState::Running | RemoteTransferState::Paused
+                    )
+                })
+            })
+            .count();
+        if active_transfers >= MAX_ACTIVE_TRANSFERS
+            || inner.transfers.len() >= MAX_BEGIN_NONCES
+            || inner.begin_nonces.len() >= MAX_BEGIN_NONCES
+        {
+            return Err(ResponseStatus::Busy);
+        }
+        let transfer_id = ProtocolId::random().map_err(|_| ResponseStatus::Internal)?;
+        let expires_at = now
+            .checked_add(self.transfer_ttl)
+            .ok_or(ResponseStatus::Internal)?;
+        let session = Arc::new(TransferSession {
+            authorized_peer: peer,
+            offer_id,
+            file_id,
+            transfer_id,
+            capability: random_bytes().map_err(|_| ResponseStatus::Internal)?,
+            server_nonce: random_bytes().map_err(|_| ResponseStatus::Internal)?,
+            expires_at,
+            inner: Mutex::new(TransferInner {
+                state: RemoteTransferState::Running,
+                last_control_sequence: 0,
+                last_control_opcode: None,
+                coverage: RangeCoverage::default(),
+            }),
+            changed: Condvar::new(),
+            activity: Mutex::new(now),
+            paused: AtomicBool::new(false),
+        });
+        inner.begin_nonces.insert(
+            nonce,
+            BeginTransferRecord {
+                authorized_peer: peer,
+                offer_id,
+                file_id,
+                transfer_id,
+            },
+        );
+        inner.transfers.insert(transfer_id, Arc::clone(&session));
+        self.metrics.begun_transfers.fetch_add(1, Ordering::Relaxed);
+        Ok(session.credentials())
+    }
+
+    fn authenticated_session(
+        &self,
+        peer: CertificateFingerprint,
+        credentials: &TransferCredentials,
+    ) -> WireResult<Arc<TransferSession>> {
+        self.ensure_peer_allowed(peer)?;
+        let inner = self.inner.lock().map_err(|_| ResponseStatus::Internal)?;
+        let Some(session) = inner.transfers.get(&credentials.transfer_id) else {
+            self.metrics.denied_requests.fetch_add(1, Ordering::Relaxed);
+            return Err(ResponseStatus::Denied);
+        };
+        if self.session_expired(session, Instant::now()) {
+            return Err(ResponseStatus::Expired);
+        }
+        if session.authorized_peer != peer
+            || session.offer_id != credentials.offer_id
+            || session.file_id != credentials.file_id
+            || session.capability != credentials.capability
+            || session.server_nonce != credentials.server_nonce
+        {
+            self.metrics.denied_requests.fetch_add(1, Ordering::Relaxed);
+            return Err(ResponseStatus::Denied);
+        }
+        *session
+            .activity
+            .lock()
+            .map_err(|_| ResponseStatus::Internal)? = Instant::now();
+        self.source_control.touch();
+        Ok(Arc::clone(session))
+    }
+
+    fn control(
+        &self,
+        peer: CertificateFingerprint,
+        credentials: &TransferCredentials,
+        sequence: u64,
+        opcode: Opcode,
+    ) -> WireResult<TransferStatus> {
+        let session = self.authenticated_session(peer, credentials)?;
+        let mut inner = session.inner.lock().map_err(|_| ResponseStatus::Internal)?;
+        if sequence == inner.last_control_sequence && inner.last_control_opcode == Some(opcode) {
+            return Ok(TransferStatus {
+                state: self.effective_state(inner.state),
+                unique_bytes: inner.coverage.unique_bytes,
+            });
+        }
+        if sequence <= inner.last_control_sequence {
+            self.metrics
+                .replayed_requests
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ResponseStatus::Replay);
+        }
+        inner.last_control_sequence = sequence;
+        inner.last_control_opcode = Some(opcode);
+        match opcode {
+            Opcode::Pause if inner.state == RemoteTransferState::Running => {
+                inner.state = RemoteTransferState::Paused;
+                session.paused.store(true, Ordering::Release);
+            }
+            Opcode::Resume if inner.state == RemoteTransferState::Paused => {
+                inner.state = RemoteTransferState::Running;
+                session.paused.store(false, Ordering::Release);
+                session.changed.notify_all();
+            }
+            Opcode::Cancel
+                if matches!(
+                    inner.state,
+                    RemoteTransferState::Running | RemoteTransferState::Paused
+                ) =>
+            {
+                inner.state = RemoteTransferState::Cancelled;
+                self.metrics
+                    .cancelled_transfers
+                    .fetch_add(1, Ordering::Relaxed);
+                session.changed.notify_all();
+            }
+            Opcode::Complete if inner.state == RemoteTransferState::Running => {
+                inner.state = RemoteTransferState::Completed;
+                session.changed.notify_all();
+            }
+            Opcode::Pause | Opcode::Resume | Opcode::Cancel | Opcode::Complete => {}
+            _ => return Err(ResponseStatus::Invalid),
+        }
+        Ok(TransferStatus {
+            state: self.effective_state(inner.state),
+            unique_bytes: inner.coverage.unique_bytes,
+        })
+    }
+
+    fn status(
+        &self,
+        peer: CertificateFingerprint,
+        credentials: &TransferCredentials,
+    ) -> WireResult<TransferStatus> {
+        let session = self.authenticated_session(peer, credentials)?;
+        let inner = session.inner.lock().map_err(|_| ResponseStatus::Internal)?;
+        Ok(TransferStatus {
+            state: self.effective_state(inner.state),
+            unique_bytes: inner.coverage.unique_bytes,
+        })
+    }
+
+    fn read_range(
+        &self,
+        peer: CertificateFingerprint,
+        credentials: &TransferCredentials,
+        offset: u64,
+        requested: usize,
+    ) -> WireResult<(TransferStatus, Vec<u8>)> {
+        if requested > MAX_SECURE_RANGE_BYTES {
+            return Err(ResponseStatus::Invalid);
+        }
+        let session = self.authenticated_session(peer, credentials)?;
+        self.metrics.read_requests.fetch_add(1, Ordering::Relaxed);
+        let _active = self.metrics.begin_read();
+        let inner = session.inner.lock().map_err(|_| ResponseStatus::Internal)?;
+        let effective = self.effective_state(inner.state);
+        if effective == RemoteTransferState::Paused {
+            return Ok((
+                TransferStatus {
+                    state: effective,
+                    unique_bytes: inner.coverage.unique_bytes,
+                },
+                Vec::new(),
+            ));
+        }
+        if effective == RemoteTransferState::Cancelled {
+            return Err(ResponseStatus::Cancelled);
+        }
+        if self.effective_state(inner.state) == RemoteTransferState::Cancelled {
+            return Err(ResponseStatus::Cancelled);
+        }
+        drop(inner);
+
+        self.ensure_peer_allowed(peer)?;
+
+        let source = self
+            .offered
+            .source(session.file_id)
+            .ok_or(ResponseStatus::Denied)?;
+        let descriptor = &self
+            .offered
+            .manifest_entry(session.file_id)
+            .ok_or(ResponseStatus::Denied)?
+            .descriptor;
+        let available = descriptor.size.saturating_sub(offset);
+        let count = usize::try_from(available.min(requested as u64)).unwrap_or(requested);
+        let mut bytes = vec![0_u8; count];
+        let read = source
+            .read_at(offset, &mut bytes)
+            .map_err(|_| ResponseStatus::SourceChanged)?;
+        bytes.truncate(read);
+
+        let mut inner = session.inner.lock().map_err(|_| ResponseStatus::Internal)?;
+        if !self.peer_is_allowed(peer) {
+            if matches!(
+                inner.state,
+                RemoteTransferState::Running | RemoteTransferState::Paused
+            ) {
+                inner.state = RemoteTransferState::Cancelled;
+                self.metrics
+                    .cancelled_transfers
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            session.changed.notify_all();
+            return Err(ResponseStatus::Denied);
+        }
+        if self.session_expired(&session, Instant::now()) {
+            return Err(ResponseStatus::Expired);
+        }
+        if self.effective_state(inner.state) == RemoteTransferState::Cancelled {
+            return Err(ResponseStatus::Cancelled);
+        }
+        inner.coverage.note(offset, read as u64);
+        let status = TransferStatus {
+            state: self.effective_state(inner.state),
+            unique_bytes: inner.coverage.unique_bytes,
+        };
+        self.metrics
+            .served_bytes
+            .fetch_add(read as u64, Ordering::Relaxed);
+        Ok((status, bytes))
+    }
+
+    fn unique_bytes(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|inner| {
+                inner
+                    .transfers
+                    .values()
+                    .filter_map(|transfer| transfer.inner.lock().ok())
+                    .map(|state| state.coverage.unique_bytes)
+                    .sum()
+            })
+            .unwrap_or_default()
+    }
+
+    fn ensure_peer_allowed(&self, peer: CertificateFingerprint) -> WireResult<()> {
+        if !self.peer_is_allowed(peer) {
+            self.metrics.denied_requests.fetch_add(1, Ordering::Relaxed);
+            self.cancel_peer_transfers(peer);
+            return Err(ResponseStatus::Denied);
+        }
+        Ok(())
+    }
+
+    fn peer_is_allowed(&self, peer: CertificateFingerprint) -> bool {
+        peer == self.authorized_peer
+            && self
+                .trust_store
+                .as_ref()
+                .is_none_or(|store| store.load_peer(peer).is_ok())
+    }
+
+    fn cancel_peer_transfers(&self, peer: CertificateFingerprint) {
+        let Ok(inner) = self.inner.lock() else {
+            return;
+        };
+        for transfer in inner
+            .transfers
+            .values()
+            .filter(|transfer| transfer.authorized_peer == peer)
+        {
+            let Ok(mut state) = transfer.inner.lock() else {
+                continue;
+            };
+            if matches!(
+                state.state,
+                RemoteTransferState::Running | RemoteTransferState::Paused
+            ) {
+                state.state = RemoteTransferState::Cancelled;
+                self.metrics
+                    .cancelled_transfers
+                    .fetch_add(1, Ordering::Relaxed);
+                transfer.changed.notify_all();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn inject_response_drops(&self, count: usize) {
+        self.injected_response_drops.store(count, Ordering::Release);
+    }
+
+    fn consume_injected_response_drop(&self) -> bool {
+        self.injected_response_drops
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
+pub struct SecureOfferServer {
+    address: SocketAddr,
+    state: Arc<ServerState>,
+    stop: Arc<AtomicBool>,
+    workers: Arc<AtomicUsize>,
+    listener_thread: Option<JoinHandle<()>>,
+}
+
+impl SecureOfferServer {
+    /// Starts the bounded TLS listener for a single authenticated offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when arguments are invalid or the listener/thread cannot start.
+    pub fn start(
+        listen_address: SocketAddr,
+        tls: PinnedTlsServer,
+        offered: SecureOfferedFile,
+        transfer_ttl: Duration,
+        request_timeout: Duration,
+    ) -> io::Result<Self> {
+        let authorized_peer = tls.expected_peer();
+        Self::start_inner(
+            listen_address,
+            SecureServerTls::Pinned(tls),
+            authorized_peer,
+            None,
+            offered,
+            transfer_ttl,
+            request_timeout,
+        )
+    }
+
+    /// Starts a single-offer server that authenticates every currently trusted device but grants
+    /// this offer only to the explicitly selected peer. Trust is rechecked for each request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when arguments are invalid or the listener/thread cannot start.
+    pub fn start_trusted(
+        listen_address: SocketAddr,
+        tls: TrustedTlsServer,
+        authorized_peer: CertificateFingerprint,
+        offered: SecureOfferedFile,
+        transfer_ttl: Duration,
+        request_timeout: Duration,
+    ) -> io::Result<Self> {
+        let trust_store = tls.trust_store();
+        let peer = trust_store.load_peer(authorized_peer)?;
+        if peer.fingerprint != authorized_peer {
+            return Err(invalid_data(
+                "authorized peer record does not match its pin",
+            ));
+        }
+        Self::start_inner(
+            listen_address,
+            SecureServerTls::Trusted(tls),
+            authorized_peer,
+            Some(trust_store),
+            offered,
+            transfer_ttl,
+            request_timeout,
+        )
+    }
+
+    fn start_inner(
+        listen_address: SocketAddr,
+        tls: SecureServerTls,
+        authorized_peer: CertificateFingerprint,
+        trust_store: Option<DeviceStore>,
+        offered: SecureOfferedFile,
+        transfer_ttl: Duration,
+        request_timeout: Duration,
+    ) -> io::Result<Self> {
+        if transfer_ttl.is_zero() || request_timeout.is_zero() {
+            return Err(invalid_data("secure server timeouts must be non-zero"));
+        }
+        let listener = TcpListener::bind(listen_address)?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let state = Arc::new(ServerState {
+            offered,
+            authorized_peer,
+            trust_store,
+            transfer_ttl,
+            request_timeout,
+            inner: Mutex::new(ServerInner {
+                transfers: HashMap::new(),
+                begin_nonces: HashMap::new(),
+            }),
+            metrics: Arc::new(SecureMetrics::default()),
+            target_location: Mutex::new(String::new()),
+            injected_response_drops: AtomicUsize::new(0),
+            source_control: SourceTaskControl::default(),
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let workers = Arc::new(AtomicUsize::new(0));
+        let thread_state = Arc::clone(&state);
+        let thread_stop = Arc::clone(&stop);
+        let thread_workers = Arc::clone(&workers);
+        let listener_thread = std::thread::Builder::new()
+            .name("pierdesk-secure-listener".to_owned())
+            .spawn(move || {
+                secure_accept_loop(listener, tls, thread_state, thread_stop, thread_workers);
+            })?;
+        Ok(Self {
+            address,
+            state,
+            stop,
+            workers,
+            listener_thread: Some(listener_thread),
+        })
+    }
+
+    #[must_use]
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    #[must_use]
+    pub fn manifest(&self) -> OfferManifest {
+        self.state.offered.manifest()
+    }
+
+    #[must_use]
+    pub fn metrics(&self) -> SecureMetricsSnapshot {
+        let mut snapshot = self.state.metrics.snapshot(self.state.unique_bytes());
+        snapshot.source_paused = self.state.source_control.state() == RemoteTransferState::Paused;
+        snapshot.source_cancelled =
+            self.state.source_control.state() == RemoteTransferState::Cancelled;
+        snapshot
+    }
+
+    pub(crate) fn file_progress(&self) -> Vec<super::product::ProductFileSnapshot> {
+        use super::product::{ProductFileSnapshot, ProductTransferState};
+        let mut bytes: HashMap<ProtocolId, u64> = HashMap::new();
+        if let Ok(inner) = self.state.inner.lock() {
+            for transfer in inner.transfers.values() {
+                if let Ok(progress) = transfer.inner.lock() {
+                    let value = bytes.entry(transfer.file_id).or_default();
+                    *value = (*value).max(progress.coverage.unique_bytes);
+                }
+            }
+        }
+        let control = self.state.source_control.state();
+        self.manifest()
+            .entries
+            .iter()
+            .map(|entry| {
+                let size = entry.descriptor.size;
+                let transferred = bytes
+                    .get(&entry.file_id)
+                    .copied()
+                    .unwrap_or_default()
+                    .min(size);
+                let state = if control == RemoteTransferState::Cancelled {
+                    ProductTransferState::Cancelled
+                } else if transferred == size && !entry.descriptor.is_directory() {
+                    ProductTransferState::Completed
+                } else if control == RemoteTransferState::Paused {
+                    ProductTransferState::Paused
+                } else if bytes.contains_key(&entry.file_id) {
+                    ProductTransferState::Running
+                } else {
+                    ProductTransferState::AwaitingPaste
+                };
+                ProductFileSnapshot {
+                    id: entry.file_id.bytes(),
+                    name: entry.descriptor.file_name.to_string(),
+                    size,
+                    transferred,
+                    bytes_per_second: 0,
+                    state,
+                    is_directory: entry.descriptor.is_directory(),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn control_handle(&self) -> SourceTaskControl {
+        self.state.source_control.clone()
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.state.source_control.state() != RemoteTransferState::Paused
+            && self.state.source_control.idle_for() > TRANSFER_IDLE_TIMEOUT
+            && self.state.inner.lock().is_ok_and(|inner| {
+                inner
+                    .transfers
+                    .values()
+                    .all(|t| !t.paused.load(Ordering::Acquire))
+            })
+    }
+
+    #[must_use]
+    pub(crate) fn target_location(&self) -> String {
+        self.state
+            .target_location
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn inject_response_drops(&self, count: usize) {
+        self.state.inject_response_drops(count);
+    }
+
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.listener_thread.take() {
+            let _ = thread.join();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.workers.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+#[derive(Clone)]
+enum SecureServerTls {
+    Pinned(PinnedTlsServer),
+    Trusted(TrustedTlsServer),
+}
+
+impl SecureServerTls {
+    fn accept(&self, socket: TcpStream) -> io::Result<AuthenticatedServerConnection> {
+        match self {
+            Self::Pinned(tls) => tls.accept_authenticated(socket),
+            Self::Trusted(tls) => tls.accept(socket),
+        }
+    }
+}
+
+impl Drop for SecureOfferServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn secure_accept_loop(
+    listener: TcpListener,
+    tls: SecureServerTls,
+    state: Arc<ServerState>,
+    stop: Arc<AtomicBool>,
+    workers: Arc<AtomicUsize>,
+) {
+    let mut next_cleanup = Instant::now();
+    while !stop.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if now >= next_cleanup {
+            state.cleanup_expired_sessions(now);
+            next_cleanup = now.checked_add(SESSION_CLEANUP_INTERVAL).unwrap_or(now);
+        }
+        match listener.accept() {
+            Ok((socket, _)) => {
+                state
+                    .metrics
+                    .accepted_connections
+                    .fetch_add(1, Ordering::Relaxed);
+                if workers.fetch_add(1, Ordering::AcqRel) >= DEFAULT_MAX_WORKERS {
+                    workers.fetch_sub(1, Ordering::AcqRel);
+                    state
+                        .metrics
+                        .protocol_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let worker_tls = tls.clone();
+                let worker_state = Arc::clone(&state);
+                let worker_count = Arc::clone(&workers);
+                if std::thread::Builder::new()
+                    .name("pierdesk-secure-worker".to_owned())
+                    .spawn(move || {
+                        let _guard = WorkerCountGuard(worker_count);
+                        match worker_tls.accept(socket) {
+                            Ok(mut authenticated) => {
+                                let result = authenticated
+                                    .stream
+                                    .sock
+                                    .set_read_timeout(Some(worker_state.connection_idle_timeout()))
+                                    .and_then(|()| {
+                                        handle_secure_connection(
+                                            &mut authenticated.stream,
+                                            &worker_state,
+                                            authenticated.peer_fingerprint,
+                                        )
+                                    });
+                                if let Err(error) = result {
+                                    if error.kind() == io::ErrorKind::PermissionDenied {
+                                        eprintln!("SECURE connection_denied=true");
+                                    } else if is_recoverable_network_error(&error) {
+                                        eprintln!("SECURE connection_lost={error}");
+                                    } else {
+                                        eprintln!("SECURE connection_error={error}");
+                                        worker_state
+                                            .metrics
+                                            .protocol_errors
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("SECURE tls_error={error}");
+                                worker_state
+                                    .metrics
+                                    .tls_failures
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                    .is_err()
+                {
+                    workers.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => {
+                state
+                    .metrics
+                    .protocol_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+}
+
+struct WorkerCountGuard(Arc<AtomicUsize>);
+
+impl Drop for WorkerCountGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn handle_secure_connection(
+    stream: &mut (impl io::Read + io::Write),
+    state: &ServerState,
+    peer: CertificateFingerprint,
+) -> io::Result<()> {
+    state
+        .ensure_peer_allowed(peer)
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "peer is not authorized"))?;
+    let hello = read_frame(stream)?;
+    if hello.opcode != Opcode::Hello as u16
+        || hello.payload.len() != 33
+        || hello.payload[0] != HELLO_ROLE_RECEIVER
+        || hello.payload[1..].iter().all(|byte| *byte == 0)
+    {
+        return Err(invalid_data("invalid secure protocol hello"));
+    }
+    write_frame(
+        stream,
+        Frame {
+            opcode: response_opcode(Opcode::Hello),
+            request_id: hello.request_id,
+            payload: random_bytes::<32>()?.to_vec(),
+        },
+    )?;
+
+    loop {
+        let Some(request) = read_frame_optional(stream)? else {
+            return Ok(());
+        };
+        state.ensure_peer_allowed(peer).map_err(|_| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "peer trust was revoked")
+        })?;
+        let opcode = Opcode::try_from(request.opcode)?;
+        let response = dispatch_request(state, peer, opcode, &request.payload);
+        if state.consume_injected_response_drop() {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "injected response loss after request processing",
+            ));
+        }
+        if opcode == Opcode::ReadRange {
+            crate::traffic_control::pace_file_payload(response.len());
+        }
+        write_frame(
+            stream,
+            Frame {
+                opcode: response_opcode(opcode),
+                request_id: request.request_id,
+                payload: response,
+            },
+        )?;
+    }
+}
+
+fn dispatch_request(
+    state: &ServerState,
+    peer: CertificateFingerprint,
+    opcode: Opcode,
+    payload: &[u8],
+) -> Vec<u8> {
+    let result = match opcode {
+        Opcode::GetDragImage => {
+            if payload != state.offered.manifest.offer_id.bytes() || state.offer_expired() {
+                Err(ResponseStatus::Expired)
+            } else {
+                let mut response = vec![ResponseStatus::Ok.encode()];
+                response.extend_from_slice(&state.offered.drag_image);
+                Ok(response)
+            }
+        }
+        Opcode::GetOffer => encode_manifest_response(state, payload),
+        Opcode::SetTargetLocation => encode_target_location_response(state, payload),
+        Opcode::BeginTransfer => encode_begin_response(state, peer, payload),
+        Opcode::ReadRange => encode_read_response(state, peer, payload),
+        Opcode::Pause | Opcode::Resume | Opcode::Cancel | Opcode::Complete => {
+            encode_control_response(state, peer, opcode, payload)
+        }
+        Opcode::Status => encode_status_response(state, peer, payload),
+        Opcode::TaskControl => {
+            if !(payload.len() == 16 || payload.len() == 17)
+                || payload[..16] != state.offered.manifest.offer_id.bytes()
+            {
+                Err(ResponseStatus::Invalid)
+            } else {
+                if payload.len() == 17 {
+                    match RemoteTransferState::decode(payload[16]) {
+                        Ok(next) if next != RemoteTransferState::Completed => {
+                            state.source_control.set(next);
+                        }
+                        _ => return vec![ResponseStatus::Invalid.encode()],
+                    }
+                }
+                state.source_control.touch();
+                Ok(vec![
+                    ResponseStatus::Ok.encode(),
+                    state.source_control.state().encode(),
+                ])
+            }
+        }
+        Opcode::Hello => Err(ResponseStatus::Invalid),
+    };
+    result.unwrap_or_else(|status| vec![status.encode()])
+}
+
+fn encode_target_location_response(state: &ServerState, payload: &[u8]) -> WireResult<Vec<u8>> {
+    if payload.len() < 20 || payload[..16] != state.offered.manifest.offer_id.bytes() {
+        return Err(ResponseStatus::Invalid);
+    }
+    let length = usize::try_from(u32::from_be_bytes(array_at(payload, 16)?))
+        .map_err(|_| ResponseStatus::Invalid)?;
+    if length == 0
+        || length > MAX_SOURCE_LOCATION_BYTES
+        || payload.len() != 20_usize.saturating_add(length)
+    {
+        return Err(ResponseStatus::Invalid);
+    }
+    let path = std::str::from_utf8(&payload[20..]).map_err(|_| ResponseStatus::Invalid)?;
+    if path.chars().any(|character| character == '\0') || !Path::new(path).is_absolute() {
+        return Err(ResponseStatus::Invalid);
+    }
+    let mut target_location = state
+        .target_location
+        .lock()
+        .map_err(|_| ResponseStatus::Internal)?;
+    path.clone_into(&mut target_location);
+    Ok(vec![ResponseStatus::Ok.encode()])
+}
+
+fn encode_manifest_response(state: &ServerState, payload: &[u8]) -> WireResult<Vec<u8>> {
+    if !payload.is_empty() || state.offer_expired() {
+        return Err(ResponseStatus::Expired);
+    }
+    let mut manifest = state.offered.manifest();
+    if manifest.ttl.is_zero() {
+        manifest.ttl = state.transfer_ttl;
+    }
+    let mut response = Vec::new();
+    response.push(ResponseStatus::Ok.encode());
+    response.extend_from_slice(&manifest.offer_id.0);
+    response.extend_from_slice(
+        &u64::try_from(manifest.ttl.as_millis())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(
+        &u32::try_from(manifest.entries.len())
+            .map_err(|_| ResponseStatus::Internal)?
+            .to_be_bytes(),
+    );
+    let source_location = manifest.source_location.as_bytes();
+    response.extend_from_slice(
+        &u32::try_from(source_location.len())
+            .map_err(|_| ResponseStatus::Internal)?
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(source_location);
+    for entry in manifest.entries.iter() {
+        response.extend_from_slice(&entry.file_id.0);
+        response.extend_from_slice(&entry.descriptor.size.to_be_bytes());
+        response.extend_from_slice(&entry.descriptor.attributes.to_be_bytes());
+        let mut time_flags = 0_u8;
+        if entry.descriptor.creation_time.is_some() {
+            time_flags |= 1;
+        }
+        if entry.descriptor.last_access_time.is_some() {
+            time_flags |= 2;
+        }
+        if entry.descriptor.last_write_time.is_some() {
+            time_flags |= 4;
+        }
+        response.push(time_flags);
+        response.extend_from_slice(&filetime_bits(entry.descriptor.creation_time).to_be_bytes());
+        response.extend_from_slice(&filetime_bits(entry.descriptor.last_access_time).to_be_bytes());
+        response.extend_from_slice(&filetime_bits(entry.descriptor.last_write_time).to_be_bytes());
+        let name = entry.descriptor.file_name.as_bytes();
+        let name_length = u16::try_from(name.len()).map_err(|_| ResponseStatus::Internal)?;
+        response.extend_from_slice(&name_length.to_be_bytes());
+        response.extend_from_slice(name);
+        if response.len() > MAX_SECURE_MANIFEST_BYTES {
+            return Err(ResponseStatus::Internal);
+        }
+    }
+    Ok(response)
+}
+
+fn encode_begin_response(
+    state: &ServerState,
+    peer: CertificateFingerprint,
+    payload: &[u8],
+) -> WireResult<Vec<u8>> {
+    if payload.len() != 64 {
+        return Err(ResponseStatus::Invalid);
+    }
+    let offer_id = ProtocolId(array_at(payload, 0)?);
+    let file_id = ProtocolId(array_at(payload, 16)?);
+    let nonce = array_at(payload, 32)?;
+    if nonce.iter().all(|byte| *byte == 0) {
+        return Err(ResponseStatus::Invalid);
+    }
+    let credentials = state.begin_transfer(peer, offer_id, file_id, nonce)?;
+    let mut response = vec![ResponseStatus::Ok.encode()];
+    response.extend_from_slice(&credentials.offer_id.0);
+    response.extend_from_slice(&credentials.file_id.0);
+    response.extend_from_slice(&credentials.transfer_id.0);
+    response.extend_from_slice(&credentials.capability);
+    response.extend_from_slice(&credentials.server_nonce);
+    response.extend_from_slice(&credentials.expires_at_millis.to_be_bytes());
+    Ok(response)
+}
+
+fn encode_read_response(
+    state: &ServerState,
+    peer: CertificateFingerprint,
+    payload: &[u8],
+) -> WireResult<Vec<u8>> {
+    if payload.len() != TransferCredentials::WIRE_LEN + 12 {
+        return Err(ResponseStatus::Invalid);
+    }
+    let credentials = TransferCredentials::decode(payload)?;
+    let offset = u64::from_be_bytes(array_at(payload, TransferCredentials::WIRE_LEN)?);
+    let requested = u32::from_be_bytes(array_at(payload, TransferCredentials::WIRE_LEN + 8)?);
+    let requested = usize::try_from(requested).map_err(|_| ResponseStatus::Invalid)?;
+    if requested > MAX_SECURE_RANGE_BYTES {
+        return Err(ResponseStatus::Invalid);
+    }
+    let requested = crate::traffic_control::file_range_limit(requested);
+    let (status, bytes) = state.read_range(peer, &credentials, offset, requested)?;
+    let mut response = encode_transfer_status(status);
+    response.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .map_err(|_| ResponseStatus::Internal)?
+            .to_be_bytes(),
+    );
+    response.extend_from_slice(&bytes);
+    Ok(response)
+}
+
+fn encode_control_response(
+    state: &ServerState,
+    peer: CertificateFingerprint,
+    opcode: Opcode,
+    payload: &[u8],
+) -> WireResult<Vec<u8>> {
+    if payload.len() != TransferCredentials::WIRE_LEN + 8 {
+        return Err(ResponseStatus::Invalid);
+    }
+    let credentials = TransferCredentials::decode(payload)?;
+    let sequence = u64::from_be_bytes(array_at(payload, TransferCredentials::WIRE_LEN)?);
+    state
+        .control(peer, &credentials, sequence, opcode)
+        .map(encode_transfer_status)
+}
+
+fn encode_status_response(
+    state: &ServerState,
+    peer: CertificateFingerprint,
+    payload: &[u8],
+) -> WireResult<Vec<u8>> {
+    if payload.len() != TransferCredentials::WIRE_LEN {
+        return Err(ResponseStatus::Invalid);
+    }
+    let credentials = TransferCredentials::decode(payload)?;
+    state.status(peer, &credentials).map(encode_transfer_status)
+}
+
+fn encode_transfer_status(status: TransferStatus) -> Vec<u8> {
+    let mut response = vec![ResponseStatus::Ok.encode(), status.state.encode()];
+    response.extend_from_slice(&status.unique_bytes.to_be_bytes());
+    response
+}
+
+fn filetime_bits(value: Option<FILETIME>) -> u64 {
+    value.map_or(0, |time| {
+        u64::from(time.dwLowDateTime) | (u64::from(time.dwHighDateTime) << 32)
+    })
+}
+
+fn filetime_from_bits(value: u64) -> FILETIME {
+    FILETIME {
+        dwLowDateTime: u32::try_from(value & u64::from(u32::MAX))
+            .expect("masked FILETIME low half always fits"),
+        dwHighDateTime: u32::try_from(value >> 32).expect("FILETIME high half always fits"),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TransferCredentials {
+    offer_id: ProtocolId,
+    file_id: ProtocolId,
+    transfer_id: ProtocolId,
+    capability: [u8; 32],
+    server_nonce: [u8; 32],
+    expires_at_millis: u64,
+}
+
+impl TransferCredentials {
+    const WIRE_LEN: usize = 112;
+
+    fn encode(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::WIRE_LEN);
+        bytes.extend_from_slice(&self.offer_id.0);
+        bytes.extend_from_slice(&self.file_id.0);
+        bytes.extend_from_slice(&self.transfer_id.0);
+        bytes.extend_from_slice(&self.capability);
+        bytes.extend_from_slice(&self.server_nonce);
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> WireResult<Self> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(ResponseStatus::Invalid);
+        }
+        Ok(Self {
+            offer_id: ProtocolId(array_at(bytes, 0)?),
+            file_id: ProtocolId(array_at(bytes, 16)?),
+            transfer_id: ProtocolId(array_at(bytes, 32)?),
+            capability: array_at(bytes, 48)?,
+            server_nonce: array_at(bytes, 80)?,
+            expires_at_millis: 0,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransferStatus {
+    pub state: RemoteTransferState,
+    pub unique_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecureRecoveryPolicy {
+    pub max_elapsed: Duration,
+    pub connect_attempt_timeout: Duration,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl SecureRecoveryPolicy {
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            max_elapsed: Duration::ZERO,
+            connect_attempt_timeout: Duration::ZERO,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SecureRecoverySnapshot {
+    pub transient_failures: u64,
+    pub reconnect_attempts: u64,
+    pub recovered_commands: u64,
+    pub exhausted_commands: u64,
+    pub active_recoveries: u64,
+}
+
+#[derive(Default)]
+struct SecureRecoveryMetrics {
+    transient_failures: AtomicU64,
+    reconnect_attempts: AtomicU64,
+    recovered_commands: AtomicU64,
+    exhausted_commands: AtomicU64,
+    active_recoveries: AtomicU64,
+}
+
+impl SecureRecoveryMetrics {
+    fn snapshot(&self) -> SecureRecoverySnapshot {
+        SecureRecoverySnapshot {
+            transient_failures: self.transient_failures.load(Ordering::Relaxed),
+            reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
+            recovered_commands: self.recovered_commands.load(Ordering::Relaxed),
+            exhausted_commands: self.exhausted_commands.load(Ordering::Relaxed),
+            active_recoveries: self.active_recoveries.load(Ordering::Relaxed),
+        }
+    }
+
+    fn begin_recovery(self: &Arc<Self>) -> ActiveRecovery {
+        self.active_recoveries.fetch_add(1, Ordering::AcqRel);
+        ActiveRecovery(Arc::clone(self))
+    }
+}
+
+struct ActiveRecovery(Arc<SecureRecoveryMetrics>);
+
+impl Drop for ActiveRecovery {
+    fn drop(&mut self) {
+        self.0.active_recoveries.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone)]
+pub struct SecureOfferClient {
+    address: SocketAddr,
+    tls: PinnedTlsClient,
+    next_request_id: Arc<AtomicU64>,
+    connections: Arc<SecureCommandConnections>,
+    recovery_policy: SecureRecoveryPolicy,
+    recovery_metrics: Arc<SecureRecoveryMetrics>,
+}
+
+#[derive(Default)]
+struct SecureCommandConnections {
+    control: Mutex<Option<SecureCommandConnection>>,
+    data: Mutex<Option<SecureCommandConnection>>,
+}
+
+struct SecureCommandConnection {
+    stream: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    close_gracefully: bool,
+}
+
+impl Drop for SecureCommandConnection {
+    fn drop(&mut self) {
+        if self.close_gracefully {
+            self.stream.conn.send_close_notify();
+            let _ = io::Write::flush(&mut self.stream);
+        }
+        let _ = self.stream.sock.shutdown(Shutdown::Both);
+    }
+}
+
+impl SecureOfferClient {
+    #[must_use]
+    pub fn new(address: SocketAddr, tls: PinnedTlsClient) -> Self {
+        Self {
+            address,
+            tls,
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            connections: Arc::new(SecureCommandConnections::default()),
+            recovery_policy: SecureRecoveryPolicy::disabled(),
+            recovery_metrics: Arc::new(SecureRecoveryMetrics::default()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_recovery_policy(
+        address: SocketAddr,
+        tls: PinnedTlsClient,
+        mut recovery_policy: SecureRecoveryPolicy,
+    ) -> Self {
+        if !recovery_policy.max_elapsed.is_zero() {
+            recovery_policy.connect_attempt_timeout = recovery_policy
+                .connect_attempt_timeout
+                .max(Duration::from_millis(10));
+            recovery_policy.initial_backoff = recovery_policy
+                .initial_backoff
+                .max(Duration::from_millis(10));
+            recovery_policy.max_backoff = recovery_policy
+                .max_backoff
+                .max(recovery_policy.initial_backoff);
+        }
+        let mut client = Self::new(address, tls);
+        client.recovery_policy = recovery_policy;
+        client
+    }
+
+    #[must_use]
+    pub fn recovery_snapshot(&self) -> SecureRecoverySnapshot {
+        self.recovery_metrics.snapshot()
+    }
+
+    /// Fetches and validates the metadata-only offer over the pinned TLS connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for TLS, I/O, protocol, expiry, or unsafe file-name failures.
+    pub fn fetch_manifest(&self) -> io::Result<OfferManifest> {
+        let response = self.command(Opcode::GetOffer, Vec::new())?;
+        Self::decode_manifest_response(&response)
+    }
+
+    pub(crate) fn fetch_drag_image(&self, offer: ProtocolId) -> io::Result<Vec<u8>> {
+        let response = self.command(Opcode::GetDragImage, offer.bytes().to_vec())?;
+        require_ok(&response)?;
+        let bytes = response[1..].to_vec();
+        super::drag_image::validate(&bytes)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn report_target_location(
+        &self,
+        offer: ProtocolId,
+        location: &str,
+    ) -> io::Result<()> {
+        if location.is_empty()
+            || location.len() > MAX_SOURCE_LOCATION_BYTES
+            || location.chars().any(|character| character == '\0')
+            || !Path::new(location).is_absolute()
+        {
+            return Err(invalid_data("invalid target location"));
+        }
+        let mut payload = Vec::with_capacity(20 + location.len());
+        payload.extend_from_slice(&offer.0);
+        payload.extend_from_slice(
+            &u32::try_from(location.len())
+                .map_err(invalid_crypto)?
+                .to_be_bytes(),
+        );
+        payload.extend_from_slice(location.as_bytes());
+        let response = self.command(Opcode::SetTargetLocation, payload)?;
+        require_ok(&response)?;
+        if response.len() != 1 {
+            return Err(invalid_data("invalid target location response"));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn decode_manifest_response(response: &[u8]) -> io::Result<OfferManifest> {
+        require_ok(response)?;
+        if response.len() < MANIFEST_HEADER_LEN {
+            return Err(invalid_data("truncated offer manifest"));
+        }
+        let offer_id = ProtocolId(array_at_io(response, 1)?);
+        let ttl_millis = u64::from_be_bytes(array_at_io(response, 17)?);
+        if ttl_millis == 0 {
+            return Err(invalid_data("expired offer manifest"));
+        }
+        let item_count = usize::try_from(u32::from_be_bytes(array_at_io(response, 25)?))
+            .map_err(invalid_crypto)?;
+        if item_count == 0 || item_count > MAX_VIRTUAL_ITEMS {
+            return Err(invalid_data("invalid offer item count"));
+        }
+        let source_location_length =
+            usize::try_from(u32::from_be_bytes(array_at_io(response, 29)?))
+                .map_err(invalid_crypto)?;
+        if source_location_length > MAX_SOURCE_LOCATION_BYTES {
+            return Err(invalid_data("invalid source location length"));
+        }
+        let source_location_end = MANIFEST_HEADER_LEN
+            .checked_add(source_location_length)
+            .ok_or_else(|| invalid_data("source location length overflow"))?;
+        let source_location = response
+            .get(MANIFEST_HEADER_LEN..source_location_end)
+            .ok_or_else(|| invalid_data("truncated source location"))?;
+        let source_location = std::str::from_utf8(source_location).map_err(invalid_crypto)?;
+        if source_location.chars().any(|character| character == '\0') {
+            return Err(invalid_data("invalid source location"));
+        }
+        let minimum = source_location_end
+            .checked_add(
+                item_count
+                    .checked_mul(MANIFEST_ENTRY_FIXED_LEN)
+                    .ok_or_else(|| invalid_data("offer manifest length overflow"))?,
+            )
+            .ok_or_else(|| invalid_data("offer manifest length overflow"))?;
+        if response.len() < minimum || response.len() > MAX_SECURE_MANIFEST_BYTES {
+            return Err(invalid_data("invalid offer manifest length"));
+        }
+        let mut cursor = source_location_end;
+        let mut entries = Vec::with_capacity(item_count);
+        let mut identifiers = std::collections::HashSet::with_capacity(item_count);
+        for _ in 0..item_count {
+            let file_id = ProtocolId(array_at_io(response, cursor)?);
+            cursor += 16;
+            if !identifiers.insert(file_id) {
+                return Err(invalid_data("duplicate offer file identifier"));
+            }
+            let size = u64::from_be_bytes(array_at_io(response, cursor)?);
+            cursor += 8;
+            let attributes = u32::from_be_bytes(array_at_io(response, cursor)?);
+            cursor += 4;
+            let time_flags = *response
+                .get(cursor)
+                .ok_or_else(|| invalid_data("truncated offer time flags"))?;
+            cursor += 1;
+            if time_flags & !0b111 != 0 {
+                return Err(invalid_data("invalid offer time flags"));
+            }
+            let creation = u64::from_be_bytes(array_at_io(response, cursor)?);
+            cursor += 8;
+            let access = u64::from_be_bytes(array_at_io(response, cursor)?);
+            cursor += 8;
+            let write = u64::from_be_bytes(array_at_io(response, cursor)?);
+            cursor += 8;
+            let name_length = usize::from(u16::from_be_bytes(array_at_io(response, cursor)?));
+            cursor += 2;
+            let name_end = cursor
+                .checked_add(name_length)
+                .ok_or_else(|| invalid_data("offer file name length overflow"))?;
+            let name = response
+                .get(cursor..name_end)
+                .ok_or_else(|| invalid_data("truncated offer file name"))?;
+            let file_name = std::str::from_utf8(name).map_err(invalid_crypto)?;
+            entries.push(OfferManifestEntry {
+                file_id,
+                descriptor: VirtualFileDescriptor {
+                    file_name: Arc::from(file_name),
+                    size,
+                    attributes,
+                    creation_time: (time_flags & 1 != 0).then(|| filetime_from_bits(creation)),
+                    last_access_time: (time_flags & 2 != 0).then(|| filetime_from_bits(access)),
+                    last_write_time: (time_flags & 4 != 0).then(|| filetime_from_bits(write)),
+                },
+            });
+            cursor = name_end;
+        }
+        if cursor != response.len() {
+            return Err(invalid_data("trailing offer manifest bytes"));
+        }
+        validate_virtual_descriptor_tree(
+            &entries
+                .iter()
+                .map(|entry| entry.descriptor.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(invalid_windows)?;
+        Ok(OfferManifest {
+            offer_id,
+            entries: Arc::from(entries),
+            ttl: Duration::from_millis(ttl_millis),
+            source_location: Arc::from(source_location),
+        })
+    }
+
+    #[cfg(test)]
+    fn begin_transfer(
+        &self,
+        manifest: &OfferManifest,
+        entry: &OfferManifestEntry,
+    ) -> io::Result<TransferCredentials> {
+        self.begin_transfer_interruptible(manifest, entry, None)
+    }
+
+    fn begin_transfer_interruptible(
+        &self,
+        manifest: &OfferManifest,
+        entry: &OfferManifestEntry,
+        interrupted: Option<&dyn Fn() -> bool>,
+    ) -> io::Result<TransferCredentials> {
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(&manifest.offer_id.0);
+        payload.extend_from_slice(&entry.file_id.0);
+        payload.extend_from_slice(&random_bytes::<32>()?);
+        let response =
+            self.command_recovering(Opcode::BeginTransfer, payload, interrupted, None)?;
+        require_ok(&response)?;
+        if response.len() != 121 {
+            return Err(invalid_data("invalid BeginTransfer response"));
+        }
+        let credentials = TransferCredentials {
+            offer_id: ProtocolId(array_at_io(&response, 1)?),
+            file_id: ProtocolId(array_at_io(&response, 17)?),
+            transfer_id: ProtocolId(array_at_io(&response, 33)?),
+            capability: array_at_io(&response, 49)?,
+            server_nonce: array_at_io(&response, 81)?,
+            expires_at_millis: u64::from_be_bytes(array_at_io(&response, 113)?),
+        };
+        if credentials.offer_id != manifest.offer_id || credentials.file_id != entry.file_id {
+            return Err(invalid_data("BeginTransfer identifiers do not match offer"));
+        }
+        Ok(credentials)
+    }
+
+    fn read_range_interruptible(
+        &self,
+        credentials: TransferCredentials,
+        offset: u64,
+        requested: usize,
+        interrupted: Option<&dyn Fn() -> bool>,
+        suspended: Option<&AtomicBool>,
+    ) -> io::Result<(TransferStatus, Vec<u8>)> {
+        if requested > MAX_SECURE_RANGE_BYTES {
+            return Err(invalid_data("secure range exceeds client limit"));
+        }
+        let requested = crate::traffic_control::file_range_limit(requested);
+        crate::traffic_control::pace_file_payload(requested);
+        let mut payload = credentials.encode();
+        payload.extend_from_slice(&offset.to_be_bytes());
+        payload.extend_from_slice(
+            &u32::try_from(requested)
+                .map_err(invalid_crypto)?
+                .to_be_bytes(),
+        );
+        let response =
+            self.command_recovering(Opcode::ReadRange, payload, interrupted, suspended)?;
+        let status = decode_transfer_status(&response)?;
+        if response.len() < 14 {
+            return Err(invalid_data("truncated ReadRange response"));
+        }
+        let length = usize::try_from(u32::from_be_bytes(array_at_io(&response, 10)?))
+            .map_err(invalid_crypto)?;
+        if response.len() != 14 + length || length > requested {
+            return Err(invalid_data("invalid ReadRange payload length"));
+        }
+        Ok((status, response[14..].to_vec()))
+    }
+
+    fn control(
+        &self,
+        credentials: TransferCredentials,
+        sequence: u64,
+        opcode: Opcode,
+    ) -> io::Result<TransferStatus> {
+        self.control_interruptible(credentials, sequence, opcode, None)
+    }
+
+    fn control_interruptible(
+        &self,
+        credentials: TransferCredentials,
+        sequence: u64,
+        opcode: Opcode,
+        interrupted: Option<&dyn Fn() -> bool>,
+    ) -> io::Result<TransferStatus> {
+        let mut payload = credentials.encode();
+        payload.extend_from_slice(&sequence.to_be_bytes());
+        let response = self.command_recovering(opcode, payload, interrupted, None)?;
+        decode_transfer_status(&response)
+    }
+
+    fn control_once(
+        &self,
+        credentials: TransferCredentials,
+        sequence: u64,
+        opcode: Opcode,
+    ) -> io::Result<TransferStatus> {
+        let mut payload = credentials.encode();
+        payload.extend_from_slice(&sequence.to_be_bytes());
+        let response = self.command(opcode, payload)?;
+        decode_transfer_status(&response)
+    }
+
+    fn task_control(
+        &self,
+        offer: ProtocolId,
+        state: Option<RemoteTransferState>,
+    ) -> io::Result<RemoteTransferState> {
+        let mut payload = offer.bytes().to_vec();
+        if let Some(state) = state {
+            payload.push(state.encode());
+        }
+        let response = self.command_recovering(Opcode::TaskControl, payload, None, None)?;
+        require_ok(&response)?;
+        if response.len() != 2 {
+            return Err(invalid_data("invalid task control response"));
+        }
+        RemoteTransferState::decode(response[1])
+            .map_err(|_| invalid_data("invalid task control state"))
+    }
+
+    fn status(&self, credentials: TransferCredentials) -> io::Result<TransferStatus> {
+        let response = self.command_status_retry_once(credentials.encode())?;
+        decode_transfer_status(&response)
+    }
+
+    /// Status is an interactive diagnostic command, so it must not enter the full recovery
+    /// window. When a previously-open control socket became stale while the data connection
+    /// recovered, discard it and make one bounded reconnect attempt instead of exposing the
+    /// stale socket error and requiring the operator to type `status` twice.
+    fn command_status_retry_once(&self, payload: Vec<u8>) -> io::Result<Vec<u8>> {
+        match self.command(Opcode::Status, payload.clone()) {
+            Ok(response) => Ok(response),
+            Err(error)
+                if !self.recovery_policy.max_elapsed.is_zero()
+                    && is_recoverable_network_error(&error) =>
+            {
+                self.recovery_metrics
+                    .transient_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                self.recovery_metrics
+                    .reconnect_attempts
+                    .fetch_add(1, Ordering::Relaxed);
+                let _active_recovery = self.recovery_metrics.begin_recovery();
+                match self.command(Opcode::Status, payload) {
+                    Ok(response) => {
+                        self.recovery_metrics
+                            .recovered_commands
+                            .fetch_add(1, Ordering::Relaxed);
+                        Ok(response)
+                    }
+                    Err(retry_error) => {
+                        if is_recoverable_network_error(&retry_error) {
+                            self.recovery_metrics
+                                .transient_failures
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(retry_error)
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn command_recovering(
+        &self,
+        opcode: Opcode,
+        payload: Vec<u8>,
+        interrupted: Option<&dyn Fn() -> bool>,
+        suspended: Option<&AtomicBool>,
+    ) -> io::Result<Vec<u8>> {
+        if self.recovery_policy.max_elapsed.is_zero() {
+            return self.command(opcode, payload);
+        }
+        let mut deadline = Instant::now()
+            .checked_add(self.recovery_policy.max_elapsed)
+            .unwrap_or(Instant::now());
+        let mut delay = self.recovery_policy.initial_backoff;
+        let mut active_recovery = None;
+        let mut attempts = 0_u64;
+        loop {
+            if attempts != 0 {
+                wait_recovery_gate(&mut deadline, interrupted, suspended)?;
+            }
+            if interrupted.is_some_and(|is_cancelled| is_cancelled()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "secure network recovery was cancelled",
+                ));
+            }
+            match self.command(opcode, payload.clone()) {
+                Ok(response) => {
+                    if attempts != 0 {
+                        self.recovery_metrics
+                            .recovered_commands
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Ok(response);
+                }
+                Err(error) if !is_recoverable_network_error(&error) => return Err(error),
+                Err(error) => {
+                    self.recovery_metrics
+                        .transient_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    active_recovery.get_or_insert_with(|| self.recovery_metrics.begin_recovery());
+                    if Instant::now() >= deadline {
+                        self.recovery_metrics
+                            .exhausted_commands
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "secure network recovery exhausted after {attempts} reconnect attempts: {error}"
+                            ),
+                        ));
+                    }
+                    attempts = attempts.saturating_add(1);
+                    self.recovery_metrics
+                        .reconnect_attempts
+                        .fetch_add(1, Ordering::Relaxed);
+                    sleep_recovery_delay(delay, deadline, interrupted)?;
+                    if Instant::now() >= deadline {
+                        self.recovery_metrics
+                            .exhausted_commands
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "secure network recovery exhausted after {attempts} reconnect attempts: {error}"
+                            ),
+                        ));
+                    }
+                    delay = delay
+                        .saturating_mul(2)
+                        .min(self.recovery_policy.max_backoff);
+                }
+            }
+        }
+    }
+
+    fn command(&self, opcode: Opcode, payload: Vec<u8>) -> io::Result<Vec<u8>> {
+        let connection_slot = if matches!(opcode, Opcode::ReadRange) {
+            &self.connections.data
+        } else {
+            &self.connections.control
+        };
+        let mut connection = connection_slot
+            .lock()
+            .map_err(|_| io::Error::other("secure client connection lock poisoned"))?;
+        if connection.is_none() {
+            *connection = Some(self.connect()?);
+        }
+
+        let result = Self::exchange(
+            &mut connection
+                .as_mut()
+                .expect("secure connection was initialized")
+                .stream,
+            &self.next_request_id,
+            opcode,
+            payload,
+        );
+        if result.is_err()
+            && let Some(mut failed) = connection.take()
+        {
+            failed.close_gracefully = false;
+        }
+        result
+    }
+
+    fn connect(&self) -> io::Result<SecureCommandConnection> {
+        let mut stream = if self.recovery_policy.max_elapsed.is_zero() {
+            self.tls.connect(self.address)?
+        } else {
+            self.tls
+                .connect_with_timeout(self.address, self.recovery_policy.connect_attempt_timeout)?
+        };
+        let hello_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let mut hello = Vec::with_capacity(33);
+        hello.push(HELLO_ROLE_RECEIVER);
+        hello.extend_from_slice(&random_bytes::<32>()?);
+        write_frame(
+            &mut stream,
+            Frame {
+                opcode: Opcode::Hello as u16,
+                request_id: hello_id,
+                payload: hello,
+            },
+        )?;
+        let hello_response = read_frame(&mut stream)?;
+        if hello_response.opcode != response_opcode(Opcode::Hello)
+            || hello_response.request_id != hello_id
+            || hello_response.payload.len() != 32
+        {
+            return Err(invalid_data("invalid secure HelloAck"));
+        }
+        Ok(SecureCommandConnection {
+            stream,
+            close_gracefully: true,
+        })
+    }
+
+    fn exchange(
+        stream: &mut (impl io::Read + io::Write),
+        next_request_id: &AtomicU64,
+        opcode: Opcode,
+        payload: Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
+        let request_id = next_request_id.fetch_add(1, Ordering::Relaxed);
+        write_frame(
+            stream,
+            Frame {
+                opcode: opcode as u16,
+                request_id,
+                payload,
+            },
+        )?;
+        let response = read_frame(stream)?;
+        if response.opcode != response_opcode(opcode) || response.request_id != request_id {
+            return Err(invalid_data("secure response does not match request"));
+        }
+        Ok(response.payload)
+    }
+}
+
+fn wait_recovery_gate(
+    deadline: &mut Instant,
+    interrupted: Option<&dyn Fn() -> bool>,
+    suspended: Option<&AtomicBool>,
+) -> io::Result<()> {
+    let paused_at = Instant::now();
+    while suspended.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+        if interrupted.is_some_and(|is_cancelled| is_cancelled()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "secure network recovery was cancelled",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    *deadline = deadline
+        .checked_add(paused_at.elapsed())
+        .unwrap_or(*deadline);
+    Ok(())
+}
+
+fn sleep_recovery_delay(
+    delay: Duration,
+    deadline: Instant,
+    interrupted: Option<&dyn Fn() -> bool>,
+) -> io::Result<()> {
+    let wake_at = Instant::now()
+        .checked_add(delay)
+        .unwrap_or(deadline)
+        .min(deadline);
+    while Instant::now() < wake_at {
+        if interrupted.is_some_and(|is_cancelled| is_cancelled()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "secure network recovery was cancelled",
+            ));
+        }
+        std::thread::sleep(
+            wake_at
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(10)),
+        );
+    }
+    Ok(())
+}
+
+fn is_recoverable_network_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::WouldBlock
+    ) || matches!(
+        error.raw_os_error(),
+        Some(
+            53      // ERROR_BAD_NETPATH
+                | 64 // ERROR_NETNAME_DELETED
+                | 121 // ERROR_SEM_TIMEOUT
+                | 10050 // WSAENETDOWN
+                | 10051 // WSAENETUNREACH
+                | 10052 // WSAENETRESET
+                | 10053 // WSAECONNABORTED
+                | 10054 // WSAECONNRESET
+                | 10060 // WSAETIMEDOUT
+                | 10061 // WSAECONNREFUSED
+                | 10064 // WSAEHOSTDOWN
+                | 10065 // WSAEHOSTUNREACH
+        )
+    )
+}
+
+pub struct SecureRemoteSource {
+    client: SecureOfferClient,
+    manifest: OfferManifest,
+    entry: OfferManifestEntry,
+    transfer: Mutex<Option<TransferCredentials>>,
+    started: AtomicBool,
+    next_control_sequence: AtomicU64,
+    completion_sent: AtomicBool,
+    read_calls: AtomicU64,
+    bytes_read: AtomicU64,
+    high_water: AtomicU64,
+    coverage: Mutex<RangeCoverage>,
+    failed: AtomicBool,
+    remote_paused: AtomicBool,
+    file_cancelled: Arc<AtomicBool>,
+    group_paused: Arc<AtomicBool>,
+    group_cancelled: Arc<AtomicBool>,
+}
+
+impl SecureRemoteSource {
+    #[must_use]
+    /// Creates a source for the first ordinary file in a validated manifest.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the manifest contains only directory descriptors. Callers handling arbitrary
+    /// trees must select an ordinary entry and use [`Self::new_for_entry`].
+    pub fn new(client: SecureOfferClient, manifest: OfferManifest) -> Self {
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| !entry.descriptor.is_directory())
+            .cloned()
+            .expect("secure manifest must contain a streamable file");
+        Self::new_for_entry(client, manifest, entry)
+    }
+
+    #[must_use]
+    pub fn new_for_entry(
+        client: SecureOfferClient,
+        manifest: OfferManifest,
+        entry: OfferManifestEntry,
+    ) -> Self {
+        Self::new_for_entry_in_group(
+            client,
+            manifest,
+            entry,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn new_for_entry_in_group(
+        client: SecureOfferClient,
+        manifest: OfferManifest,
+        entry: OfferManifestEntry,
+        group_paused: Arc<AtomicBool>,
+        group_cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            client,
+            manifest,
+            entry,
+            transfer: Mutex::new(None),
+            started: AtomicBool::new(false),
+            next_control_sequence: AtomicU64::new(1),
+            completion_sent: AtomicBool::new(false),
+            read_calls: AtomicU64::new(0),
+            bytes_read: AtomicU64::new(0),
+            high_water: AtomicU64::new(0),
+            coverage: Mutex::new(RangeCoverage::default()),
+            failed: AtomicBool::new(false),
+            remote_paused: AtomicBool::new(false),
+            file_cancelled: Arc::new(AtomicBool::new(false)),
+            group_paused,
+            group_cancelled,
+        }
+    }
+
+    fn credentials(&self) -> io::Result<TransferCredentials> {
+        let mut transfer = self
+            .transfer
+            .lock()
+            .map_err(|_| io::Error::other("remote transfer lock poisoned"))?;
+        if let Some(credentials) = *transfer {
+            return Ok(credentials);
+        }
+        let credentials = self.client.begin_transfer_interruptible(
+            &self.manifest,
+            &self.entry,
+            Some(&|| self.is_cancelled()),
+        )?;
+        *transfer = Some(credentials);
+        self.started.store(true, Ordering::Release);
+        drop(transfer);
+        if self.is_cancelled() {
+            let sequence = self.next_control_sequence.fetch_add(1, Ordering::Relaxed);
+            let _ = self.client.control(credentials, sequence, Opcode::Cancel);
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "transfer group was cancelled",
+            ));
+        }
+        Ok(credentials)
+    }
+
+    /// Pauses this started transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a TLS, protocol, authentication, expiry, or server-state error.
+    pub fn pause(&self) -> io::Result<TransferStatus> {
+        self.send_control(Opcode::Pause)
+    }
+
+    /// Resumes this started transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a TLS, protocol, authentication, expiry, or server-state error.
+    pub fn resume(&self) -> io::Result<TransferStatus> {
+        self.send_control(Opcode::Resume)
+    }
+
+    /// Irreversibly cancels this started transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a TLS, protocol, authentication, expiry, or server-state error.
+    pub fn cancel(&self) -> io::Result<TransferStatus> {
+        self.send_control(Opcode::Cancel)
+    }
+
+    /// Marks this transfer complete after the authenticated manifest length has been read.
+    ///
+    /// # Errors
+    ///
+    /// Returns a TLS, protocol, authentication, expiry, or server-state error.
+    pub fn complete(&self) -> io::Result<TransferStatus> {
+        if self.completion_sent.load(Ordering::Acquire) {
+            return self.status();
+        }
+        let status = self.send_control(Opcode::Complete)?;
+        self.completion_sent.store(true, Ordering::Release);
+        Ok(status)
+    }
+
+    /// Reads the server-authoritative transfer status and unique progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns a TLS, protocol, authentication, expiry, or server-state error.
+    pub fn status(&self) -> io::Result<TransferStatus> {
+        self.client.status(self.credentials()?)
+    }
+
+    #[must_use]
+    pub fn has_started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    fn send_control(&self, opcode: Opcode) -> io::Result<TransferStatus> {
+        let sequence = self.next_control_sequence.fetch_add(1, Ordering::Relaxed);
+        let cancelled = || self.is_cancelled();
+        let interrupted = (opcode != Opcode::Cancel).then_some(&cancelled as &dyn Fn() -> bool);
+        self.client
+            .control_interruptible(self.credentials()?, sequence, opcode, interrupted)
+    }
+
+    fn cancel_local_first(&self) -> io::Result<TransferStatus> {
+        let credentials = self
+            .transfer
+            .lock()
+            .map_err(|_| io::Error::other("remote transfer lock poisoned"))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "transfer has not started")
+            })?;
+        let sequence = self.next_control_sequence.fetch_add(1, Ordering::Relaxed);
+        self.client
+            .control_once(credentials, sequence, Opcode::Cancel)
+    }
+
+    #[must_use]
+    pub fn read_calls(&self) -> u64 {
+        self.read_calls.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read.load(Ordering::Relaxed)
+    }
+
+    fn locally_complete(&self) -> bool {
+        self.completion_sent.load(Ordering::Acquire)
+            || (self.read_calls() != 0
+                && self.high_water.load(Ordering::Acquire) >= self.entry.descriptor.size)
+    }
+
+    #[cfg(test)]
+    fn credentials_for_test(&self) -> io::Result<TransferCredentials> {
+        self.credentials()
+    }
+}
+
+#[derive(Default)]
+pub struct RemoteTransferRegistry {
+    sources: Mutex<Vec<Arc<SecureRemoteSource>>>,
+    cancelled_files: Mutex<std::collections::HashMap<[u8; 16], Arc<AtomicBool>>>,
+    control_notify: Arc<Mutex<()>>,
+    control_generation: Arc<AtomicU64>,
+    task: Mutex<Option<(SecureOfferClient, ProtocolId)>>,
+    group_paused: Arc<AtomicBool>,
+    group_cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransferGroupStatus {
+    pub state: RemoteTransferState,
+    pub started_transfers: usize,
+    pub unique_bytes: u64,
+    pub read_calls: u64,
+    pub bytes_read: u64,
+    pub remote_acknowledged: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransferLocalProgress {
+    pub started_transfers: usize,
+    pub completed_transfers: usize,
+    pub read_calls: u64,
+    pub bytes_read: u64,
+    pub paused: bool,
+    pub cancelled: bool,
+}
+
+impl RemoteTransferRegistry {
+    /// Applies the local gate immediately, including files that Explorer has not opened yet.
+    /// No network round trip is allowed on the clipboard worker's control path.
+    pub(crate) fn set_local_control(&self, state: RemoteTransferState) {
+        match state {
+            RemoteTransferState::Paused => self.group_paused.store(true, Ordering::Release),
+            RemoteTransferState::Running => self.group_paused.store(false, Ordering::Release),
+            RemoteTransferState::Cancelled => {
+                self.group_cancelled.store(true, Ordering::Release);
+                self.group_paused.store(false, Ordering::Release);
+                if let Ok(sources) = self.sources.lock() {
+                    for source in sources.iter() {
+                        source.file_cancelled.store(true, Ordering::Release);
+                    }
+                    notify_cancellations(sources.clone());
+                }
+            }
+            RemoteTransferState::Completed => {}
+        }
+        if state == RemoteTransferState::Completed {
+            return;
+        }
+        let generation = self.control_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let Some((client, offer)) = self.task.lock().ok().and_then(|task| task.clone()) else {
+            return;
+        };
+        let paused = Arc::clone(&self.group_paused);
+        let cancelled = Arc::clone(&self.group_cancelled);
+        let notify = Arc::clone(&self.control_notify);
+        let current = Arc::clone(&self.control_generation);
+        let _ = std::thread::Builder::new()
+            .name("pierdesk-task-control".to_owned())
+            .spawn(move || {
+                {
+                    let _guard = notify
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if current.load(Ordering::Acquire) != generation {
+                        return;
+                    }
+                    let _ = client.task_control(offer, Some(state));
+                }
+                // A task paused here may be resumed or cancelled from the sending computer.
+                // Poll only while locally paused; do not keep an ended task/client alive forever.
+                while paused.load(Ordering::Acquire)
+                    && !cancelled.load(Ordering::Acquire)
+                    && current.load(Ordering::Acquire) == generation
+                {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let _guard = notify
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if current.load(Ordering::Acquire) != generation {
+                        return;
+                    }
+                    match client.task_control(offer, None) {
+                        Ok(RemoteTransferState::Running | RemoteTransferState::Completed) => {
+                            paused.store(false, Ordering::Release);
+                        }
+                        Ok(RemoteTransferState::Cancelled) => {
+                            cancelled.store(true, Ordering::Release);
+                            paused.store(false, Ordering::Release);
+                        }
+                        Err(_) => break,
+                        _ => {}
+                    }
+                }
+            });
+    }
+
+    pub(crate) fn bind_task(&self, client: SecureOfferClient, offer: ProtocolId) {
+        *self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((client, offer));
+    }
+
+    pub(crate) fn cancel_files(&self, ids: &[[u8; 16]]) {
+        if let Ok(mut files) = self.cancelled_files.lock() {
+            for id in ids {
+                files.entry(*id).or_default().store(true, Ordering::Release);
+            }
+        }
+        if let Ok(sources) = self.sources.lock() {
+            notify_cancellations(
+                sources
+                    .iter()
+                    .filter(|source| {
+                        ids.contains(&source.entry.file_id.bytes()) && !source.locally_complete()
+                    })
+                    .cloned()
+                    .collect(),
+            );
+        }
+    }
+
+    pub(crate) fn file_progress(
+        &self,
+        manifest: &OfferManifest,
+    ) -> Vec<super::product::ProductFileSnapshot> {
+        use super::product::{ProductFileSnapshot, ProductTransferState};
+        let sources = self
+            .sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cancelled = self
+            .cancelled_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        manifest
+            .entries
+            .iter()
+            .map(|entry| {
+                let id = entry.file_id.bytes();
+                let matching = sources
+                    .iter()
+                    .filter(|source| source.entry.file_id == entry.file_id)
+                    .collect::<Vec<_>>();
+                let transferred = matching
+                    .iter()
+                    .map(|source| source.high_water.load(Ordering::Acquire))
+                    .max()
+                    .unwrap_or(0)
+                    .min(entry.descriptor.size);
+                let complete = matching.iter().any(|source| source.locally_complete());
+                let started = matching.iter().any(|source| source.read_calls() != 0);
+                let state = if complete {
+                    ProductTransferState::Completed
+                } else if self.group_cancelled.load(Ordering::Acquire)
+                    || cancelled
+                        .get(&id)
+                        .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    ProductTransferState::Cancelled
+                } else if matching
+                    .iter()
+                    .any(|source| source.failed.load(Ordering::Acquire))
+                {
+                    ProductTransferState::Failed
+                } else if self.group_paused.load(Ordering::Acquire)
+                    || matching
+                        .iter()
+                        .any(|source| source.remote_paused.load(Ordering::Acquire))
+                {
+                    ProductTransferState::Paused
+                } else if started {
+                    ProductTransferState::Running
+                } else {
+                    ProductTransferState::AwaitingPaste
+                };
+                ProductFileSnapshot {
+                    id,
+                    name: entry.descriptor.file_name.to_string(),
+                    size: entry.descriptor.size,
+                    transferred,
+                    bytes_per_second: 0,
+                    state,
+                    is_directory: entry.descriptor.is_directory(),
+                }
+            })
+            .collect()
+    }
+    /// Creates and remembers a source for the first ordinary file in a validated manifest.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the manifest contains only directory descriptors. Tree-aware callers must use
+    /// [`Self::create_source_for_entry`].
+    pub fn create_source(
+        &self,
+        client: SecureOfferClient,
+        manifest: OfferManifest,
+    ) -> Arc<SecureRemoteSource> {
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|entry| !entry.descriptor.is_directory())
+            .cloned()
+            .expect("secure manifest must contain a streamable file");
+        self.create_source_for_entry(client, manifest, entry)
+    }
+
+    pub fn create_source_for_entry(
+        &self,
+        client: SecureOfferClient,
+        manifest: OfferManifest,
+        entry: OfferManifestEntry,
+    ) -> Arc<SecureRemoteSource> {
+        self.bind_task(client.clone(), manifest.offer_id);
+        let file_cancelled = self
+            .cancelled_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(entry.file_id.bytes())
+            .or_default()
+            .clone();
+        let mut source = SecureRemoteSource::new_for_entry_in_group(
+            client,
+            manifest,
+            entry,
+            Arc::clone(&self.group_paused),
+            Arc::clone(&self.group_cancelled),
+        );
+        source.file_cancelled = file_cancelled;
+        self.remember_source(Arc::new(source))
+    }
+
+    fn remember_source(&self, source: Arc<SecureRemoteSource>) -> Arc<SecureRemoteSource> {
+        if let Ok(mut sources) = self.sources.lock() {
+            sources.push(Arc::clone(&source));
+            if sources.len() > MAX_BEGIN_NONCES {
+                let excess = sources.len() - MAX_BEGIN_NONCES;
+                sources.drain(..excess);
+            }
+        }
+        source
+    }
+
+    /// Returns a non-blocking process-local progress snapshot without issuing a network request.
+    #[must_use]
+    pub fn local_progress(&self) -> TransferLocalProgress {
+        let Ok(sources) = self.sources.lock() else {
+            return TransferLocalProgress {
+                started_transfers: 0,
+                completed_transfers: 0,
+                read_calls: 0,
+                bytes_read: 0,
+                paused: self.group_paused.load(Ordering::Acquire),
+                cancelled: self.group_cancelled.load(Ordering::Acquire),
+            };
+        };
+        TransferLocalProgress {
+            started_transfers: sources.iter().filter(|source| source.has_started()).count(),
+            completed_transfers: sources
+                .iter()
+                .filter(|source| source.locally_complete())
+                .count(),
+            read_calls: sources.iter().map(|source| source.read_calls()).sum(),
+            bytes_read: sources.iter().map(|source| source.bytes_read()).sum(),
+            paused: self.group_paused.load(Ordering::Acquire)
+                || sources
+                    .iter()
+                    .any(|source| source.remote_paused.load(Ordering::Acquire)),
+            cancelled: self.group_cancelled.load(Ordering::Acquire),
+        }
+    }
+
+    /// Returns the newest started file and its process-local read progress for presentation.
+    #[must_use]
+    pub fn current_file_progress(&self) -> Option<(String, u64, u64)> {
+        self.sources.lock().ok().and_then(|sources| {
+            sources
+                .iter()
+                .rev()
+                .find(|source| {
+                    source.has_started() && !source.completion_sent.load(Ordering::Acquire)
+                })
+                .or_else(|| sources.iter().rev().find(|source| source.has_started()))
+                .map(|source| {
+                    let size = source.entry.descriptor.size;
+                    (
+                        source.entry.descriptor.file_name.to_string(),
+                        source.bytes_read().min(size),
+                        size,
+                    )
+                })
+        })
+    }
+
+    /// Returns the newest live source that has actually begun a transfer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotConnected` before the first non-empty stream read, or an internal lock error.
+    pub fn latest_started(&self) -> io::Result<Arc<SecureRemoteSource>> {
+        let sources = self
+            .sources
+            .lock()
+            .map_err(|_| io::Error::other("remote source registry lock poisoned"))?;
+        sources
+            .iter()
+            .rev()
+            .find(|source| source.has_started())
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no transfer has started"))
+    }
+
+    fn started_sources(&self) -> io::Result<Vec<Arc<SecureRemoteSource>>> {
+        let sources = self
+            .sources
+            .lock()
+            .map_err(|_| io::Error::other("remote source registry lock poisoned"))?;
+        let started = sources
+            .iter()
+            .filter(|source| source.has_started())
+            .cloned()
+            .collect::<Vec<_>>();
+        if started.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "no transfer has started",
+            ));
+        }
+        Ok(started)
+    }
+
+    /// Pauses every file stream that belongs to the current Explorer paste operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before any stream starts or when a TLS/protocol control request fails.
+    pub fn pause_all(&self) -> io::Result<TransferGroupStatus> {
+        let sources = self.started_sources()?;
+        self.group_paused.store(true, Ordering::Release);
+        for source in &sources {
+            source.pause()?;
+        }
+        Self::aggregate(&sources)
+    }
+
+    /// Resumes every paused file stream in the current Explorer paste operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before any stream starts or when a TLS/protocol control request fails.
+    pub fn resume_all(&self) -> io::Result<TransferGroupStatus> {
+        let sources = self.started_sources()?;
+        self.group_paused.store(false, Ordering::Release);
+        for source in &sources {
+            source.resume()?;
+        }
+        Self::aggregate(&sources)
+    }
+
+    /// Irreversibly cancels all current and not-yet-opened streams in this paste operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before any stream starts or when a TLS/protocol control request fails.
+    pub fn cancel_all(&self) -> io::Result<TransferGroupStatus> {
+        self.group_cancelled.store(true, Ordering::Release);
+        self.group_paused.store(false, Ordering::Release);
+        let sources = self
+            .sources
+            .lock()
+            .map_err(|_| io::Error::other("remote registry lock poisoned"))?
+            .clone();
+        for source in &sources {
+            source.file_cancelled.store(true, Ordering::Release);
+        }
+        let mut unique_bytes = 0_u64;
+        let mut remote_acknowledged = true;
+        for source in &sources {
+            if let Ok(status) = source.cancel_local_first() {
+                unique_bytes = unique_bytes.saturating_add(status.unique_bytes);
+            } else {
+                remote_acknowledged = false;
+                unique_bytes = unique_bytes.saturating_add(source.bytes_read());
+            }
+        }
+        Ok(TransferGroupStatus {
+            state: RemoteTransferState::Cancelled,
+            started_transfers: sources.len(),
+            unique_bytes,
+            read_calls: sources.iter().map(|source| source.read_calls()).sum(),
+            bytes_read: sources.iter().map(|source| source.bytes_read()).sum(),
+            remote_acknowledged,
+        })
+    }
+
+    /// Returns aggregate progress for all file streams that have started in this paste operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before any stream starts or when a TLS/protocol status request fails.
+    pub fn status_all(&self) -> io::Result<TransferGroupStatus> {
+        let sources = self.started_sources()?;
+        Self::aggregate(&sources)
+    }
+
+    fn aggregate(sources: &[Arc<SecureRemoteSource>]) -> io::Result<TransferGroupStatus> {
+        let mut state = RemoteTransferState::Completed;
+        let mut unique_bytes = 0_u64;
+        let mut read_calls = 0_u64;
+        let mut bytes_read = 0_u64;
+        for source in sources {
+            let status = source.status()?;
+            state = match (state, status.state) {
+                (_, RemoteTransferState::Cancelled) | (RemoteTransferState::Cancelled, _) => {
+                    RemoteTransferState::Cancelled
+                }
+                (_, RemoteTransferState::Running) | (RemoteTransferState::Running, _) => {
+                    RemoteTransferState::Running
+                }
+                (_, RemoteTransferState::Paused) | (RemoteTransferState::Paused, _) => {
+                    RemoteTransferState::Paused
+                }
+                _ => RemoteTransferState::Completed,
+            };
+            unique_bytes = unique_bytes.saturating_add(status.unique_bytes);
+            read_calls = read_calls.saturating_add(source.read_calls());
+            bytes_read = bytes_read.saturating_add(source.bytes_read());
+        }
+        Ok(TransferGroupStatus {
+            state,
+            started_transfers: sources.len(),
+            unique_bytes,
+            read_calls,
+            bytes_read,
+            remote_acknowledged: true,
+        })
+    }
+
+    #[must_use]
+    pub fn live_sources(&self) -> usize {
+        self.sources
+            .lock()
+            .map(|sources| sources.len())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn recovery_snapshot(&self) -> SecureRecoverySnapshot {
+        self.sources
+            .lock()
+            .ok()
+            .and_then(|sources| {
+                sources
+                    .first()
+                    .map(|source| source.client.recovery_snapshot())
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn notify_cancellations(sources: Vec<Arc<SecureRemoteSource>>) {
+    // The local gate is already closed. A lost acknowledgement cannot keep downloading or
+    // block another task's controls; this only releases the sender's session sooner.
+    let _ = std::thread::Builder::new()
+        .name("pierdesk-cancel-notify".to_owned())
+        .spawn(move || {
+            for source in sources {
+                if !source.locally_complete() {
+                    let _ = source.cancel_local_first();
+                }
+            }
+        });
+}
+
+impl ReadAtSource for SecureRemoteSource {
+    fn len(&self) -> u64 {
+        self.entry.descriptor.size
+    }
+
+    fn read_at(&self, offset: u64, destination: &mut [u8]) -> Result<usize> {
+        let result = self.read_content(offset, destination);
+        if !self.file_cancelled.load(Ordering::Acquire)
+            && result
+                .as_ref()
+                .is_err_and(|e| e.code() == HRESULT::from_win32(ERROR_CANCELLED.0))
+        {
+            self.group_cancelled.store(true, Ordering::Release);
+        }
+        if result.is_err()
+            && !self.group_cancelled.load(Ordering::Acquire)
+            && !self.file_cancelled.load(Ordering::Acquire)
+        {
+            self.failed.store(true, Ordering::Release);
+        }
+        result
+    }
+}
+
+impl SecureRemoteSource {
+    fn is_cancelled(&self) -> bool {
+        self.group_cancelled.load(Ordering::Acquire) || self.file_cancelled.load(Ordering::Acquire)
+    }
+
+    fn read_content(&self, offset: u64, destination: &mut [u8]) -> Result<usize> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.group_cancelled.load(Ordering::Acquire)
+                || self.file_cancelled.load(Ordering::Acquire)
+            {
+                return Err(Error::from_hresult(HRESULT::from_win32(ERROR_CANCELLED.0)));
+            }
+            if !self.group_paused.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        let requested =
+            crate::traffic_control::file_range_limit(destination.len().min(MAX_SECURE_RANGE_BYTES));
+        let credentials = self.credentials().map_err(io_to_windows_error)?;
+        let bytes = loop {
+            let (status, bytes) = self
+                .client
+                .read_range_interruptible(
+                    credentials,
+                    offset,
+                    requested,
+                    Some(&|| self.is_cancelled()),
+                    Some(&self.group_paused),
+                )
+                .map_err(io_to_windows_error)?;
+            self.remote_paused.store(
+                status.state == RemoteTransferState::Paused,
+                Ordering::Release,
+            );
+            if status.state == RemoteTransferState::Paused && bytes.is_empty() {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            break bytes;
+        };
+        if bytes.is_empty() && offset < self.entry.descriptor.size {
+            return Err(Error::from_hresult(HRESULT::from_win32(ERROR_READ_FAULT.0)));
+        }
+        if bytes.is_empty()
+            && offset >= self.entry.descriptor.size
+            && !self.completion_sent.swap(true, Ordering::AcqRel)
+        {
+            let sequence = self.next_control_sequence.fetch_add(1, Ordering::Relaxed);
+            if let Err(error) = self.client.control_interruptible(
+                credentials,
+                sequence,
+                Opcode::Complete,
+                Some(&|| self.is_cancelled()),
+            ) {
+                self.completion_sent.store(false, Ordering::Release);
+                return Err(io_to_windows_error(error));
+            }
+        }
+        destination[..bytes.len()].copy_from_slice(&bytes);
+        self.bytes_read
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        if let Ok(mut coverage) = self.coverage.lock() {
+            coverage.note(offset, bytes.len() as u64);
+            self.high_water
+                .store(coverage.unique_bytes, Ordering::Release);
+        }
+        Ok(bytes.len())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+enum Opcode {
+    Hello = 1,
+    GetOffer = 2,
+    BeginTransfer = 3,
+    ReadRange = 4,
+    Pause = 5,
+    Resume = 6,
+    Cancel = 7,
+    Status = 8,
+    Complete = 9,
+    GetDragImage = 10,
+    SetTargetLocation = 11,
+    TaskControl = 12,
+}
+
+impl TryFrom<u16> for Opcode {
+    type Error = io::Error;
+
+    fn try_from(value: u16) -> io::Result<Self> {
+        match value {
+            1 => Ok(Self::Hello),
+            2 => Ok(Self::GetOffer),
+            3 => Ok(Self::BeginTransfer),
+            4 => Ok(Self::ReadRange),
+            5 => Ok(Self::Pause),
+            6 => Ok(Self::Resume),
+            7 => Ok(Self::Cancel),
+            8 => Ok(Self::Status),
+            9 => Ok(Self::Complete),
+            10 => Ok(Self::GetDragImage),
+            11 => Ok(Self::SetTargetLocation),
+            12 => Ok(Self::TaskControl),
+            _ => Err(invalid_data("unknown secure protocol opcode")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponseStatus {
+    Ok,
+    Invalid,
+    Denied,
+    Expired,
+    Replay,
+    Busy,
+    Cancelled,
+    Timeout,
+    SourceChanged,
+    Internal,
+}
+
+impl ResponseStatus {
+    fn encode(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Invalid => 1,
+            Self::Denied => 2,
+            Self::Expired => 3,
+            Self::Replay => 4,
+            Self::Busy => 5,
+            Self::Cancelled => 6,
+            Self::Timeout => 7,
+            Self::SourceChanged => 8,
+            Self::Internal => 9,
+        }
+    }
+
+    fn decode(value: u8) -> io::Result<Self> {
+        match value {
+            0 => Ok(Self::Ok),
+            1 => Ok(Self::Invalid),
+            2 => Ok(Self::Denied),
+            3 => Ok(Self::Expired),
+            4 => Ok(Self::Replay),
+            5 => Ok(Self::Busy),
+            6 => Ok(Self::Cancelled),
+            7 => Ok(Self::Timeout),
+            8 => Ok(Self::SourceChanged),
+            9 => Ok(Self::Internal),
+            _ => Err(invalid_data("invalid secure response status")),
+        }
+    }
+}
+
+type WireResult<T> = std::result::Result<T, ResponseStatus>;
+
+#[derive(Debug)]
+struct Frame {
+    opcode: u16,
+    request_id: u64,
+    payload: Vec<u8>,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn write_frame(stream: &mut impl io::Write, frame: Frame) -> io::Result<()> {
+    if frame.payload.len() > MAX_FRAME_PAYLOAD {
+        return Err(invalid_data("secure frame payload exceeds limit"));
+    }
+    let payload_length = u32::try_from(frame.payload.len()).map_err(invalid_crypto)?;
+    let mut header = [0_u8; FRAME_HEADER_LEN];
+    header[..4].copy_from_slice(&MAGIC);
+    header[4..6].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+    header[6..8].copy_from_slice(&frame.opcode.to_be_bytes());
+    header[8..16].copy_from_slice(&frame.request_id.to_be_bytes());
+    header[16..20].copy_from_slice(&payload_length.to_be_bytes());
+    stream.write_all(&header)?;
+    stream.write_all(&frame.payload)?;
+    stream.flush()
+}
+
+fn read_frame(stream: &mut impl io::Read) -> io::Result<Frame> {
+    read_frame_optional(stream)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "secure connection closed"))
+}
+
+fn read_frame_optional(stream: &mut impl io::Read) -> io::Result<Option<Frame>> {
+    let mut header = [0_u8; FRAME_HEADER_LEN];
+    if io::Read::read(stream, &mut header[..1])? == 0 {
+        return Ok(None);
+    }
+    stream.read_exact(&mut header[1..])?;
+    if header[..4] != MAGIC || u16::from_be_bytes(array_at_io(&header, 4)?) != PROTOCOL_VERSION {
+        return Err(invalid_data("invalid secure frame magic or version"));
+    }
+    let opcode = u16::from_be_bytes(array_at_io(&header, 6)?);
+    let request_id = u64::from_be_bytes(array_at_io(&header, 8)?);
+    let payload_length =
+        usize::try_from(u32::from_be_bytes(array_at_io(&header, 16)?)).map_err(invalid_crypto)?;
+    if payload_length > MAX_FRAME_PAYLOAD {
+        return Err(invalid_data("secure frame payload exceeds limit"));
+    }
+    let mut payload = vec![0_u8; payload_length];
+    stream.read_exact(&mut payload)?;
+    Ok(Some(Frame {
+        opcode,
+        request_id,
+        payload,
+    }))
+}
+
+fn response_opcode(opcode: Opcode) -> u16 {
+    opcode as u16 | RESPONSE_BIT
+}
+
+fn require_ok(response: &[u8]) -> io::Result<()> {
+    let status = response
+        .first()
+        .copied()
+        .ok_or_else(|| invalid_data("empty secure response"))?;
+    match ResponseStatus::decode(status)? {
+        ResponseStatus::Ok => Ok(()),
+        other => Err(status_error(other)),
+    }
+}
+
+fn decode_transfer_status(response: &[u8]) -> io::Result<TransferStatus> {
+    require_ok(response)?;
+    if response.len() < 10 {
+        return Err(invalid_data("truncated transfer status"));
+    }
+    Ok(TransferStatus {
+        state: RemoteTransferState::decode(response[1])?,
+        unique_bytes: u64::from_be_bytes(array_at_io(response, 2)?),
+    })
+}
+
+fn status_error(status: ResponseStatus) -> io::Error {
+    let (kind, message) = match status {
+        ResponseStatus::Invalid => (io::ErrorKind::InvalidData, "invalid request"),
+        ResponseStatus::Denied => (io::ErrorKind::PermissionDenied, "request denied"),
+        ResponseStatus::Expired => (io::ErrorKind::TimedOut, "offer or transfer expired"),
+        ResponseStatus::Replay => (io::ErrorKind::PermissionDenied, "replayed request denied"),
+        ResponseStatus::Busy => (io::ErrorKind::WouldBlock, "server is busy"),
+        ResponseStatus::Cancelled => (io::ErrorKind::Interrupted, "transfer cancelled"),
+        ResponseStatus::Timeout => (io::ErrorKind::TimedOut, "transfer request timed out"),
+        ResponseStatus::SourceChanged => (io::ErrorKind::InvalidData, "source file changed"),
+        ResponseStatus::Internal => (io::ErrorKind::Other, "server internal error"),
+        ResponseStatus::Ok => (io::ErrorKind::Other, "unexpected success status"),
+    };
+    io::Error::new(kind, message)
+}
+
+fn random_bytes<const N: usize>() -> io::Result<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    getrandom::fill(&mut bytes).map_err(invalid_crypto)?;
+    Ok(bytes)
+}
+
+fn array_at<const N: usize>(bytes: &[u8], start: usize) -> WireResult<[u8; N]> {
+    bytes
+        .get(start..start + N)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or(ResponseStatus::Invalid)
+}
+
+fn array_at_io<const N: usize>(bytes: &[u8], start: usize) -> io::Result<[u8; N]> {
+    bytes
+        .get(start..start + N)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| invalid_data("truncated secure protocol field"))
+}
+
+fn invalid_crypto(error: impl std::fmt::Display) -> io::Error {
+    invalid_data(error.to_string())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn invalid_windows(error: Error) -> io::Error {
+    invalid_data(format!(
+        "Windows validation failed: {:#010X}",
+        error.code().0.cast_unsigned()
+    ))
+}
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn io_to_windows_error(error: io::Error) -> Error {
+    let hresult = match error.kind() {
+        io::ErrorKind::Interrupted => HRESULT::from_win32(ERROR_CANCELLED.0),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => HRESULT::from_win32(ERROR_TIMEOUT.0),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidData => E_ACCESSDENIED,
+        io::ErrorKind::InvalidInput => E_INVALIDARG,
+        _ => HRESULT::from_win32(ERROR_READ_FAULT.0),
+    };
+    Error::from_hresult(hresult)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+    use std::path::PathBuf;
+
+    use rcgen::CertifiedKey;
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+
+    use crate::security::{CertificateFingerprint, TlsIdentity};
+
+    use super::*;
+    use crate::clipboard::source::MemorySource;
+    use crate::clipboard::transfer::generated_byte;
+
+    struct TestPeers {
+        server: PinnedTlsServer,
+        client: PinnedTlsClient,
+        other_client: PinnedTlsClient,
+    }
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let mut random = [0_u8; 8];
+            getrandom::fill(&mut random).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "pierdesk-secure-{name}-{}-{}",
+                std::process::id(),
+                u64::from_le_bytes(random)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct TrustedTestPeers {
+        _server_directory: TestDirectory,
+        _authorized_directory: TestDirectory,
+        _other_directory: TestDirectory,
+        server_store: DeviceStore,
+        server: TrustedTlsServer,
+        authorized: PinnedTlsClient,
+        other: PinnedTlsClient,
+        authorized_fingerprint: CertificateFingerprint,
+    }
+
+    fn identity() -> (TlsIdentity, Vec<u8>) {
+        let CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(["clipferry.local".to_owned()]).unwrap();
+        let certificate = cert.der().as_ref().to_vec();
+        let fingerprint = CertificateFingerprint::from_certificate(&certificate);
+        let identity = TlsIdentity::from_test_parts(
+            CertificateDer::from(certificate.clone()),
+            PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
+            fingerprint,
+        );
+        (identity, certificate)
+    }
+
+    fn peers() -> TestPeers {
+        peers_with_timeout(Duration::from_secs(3))
+    }
+
+    #[test]
+    fn directory_transfer_reads_later_files_after_local_offer_expiry_and_replacement() {
+        use crate::clipboard::local_file::{FileSnapshot, FileTreeSnapshot, LocalOfferRegistry};
+        let directory = TestDirectory::new("task-owned-files");
+        let first_path = directory.0.join("first.bin");
+        let second_path = directory.0.join("second.bin");
+        fs::write(&first_path, b"first").unwrap();
+        fs::write(&second_path, b"later").unwrap();
+        let tree = FileTreeSnapshot::capture(&[first_path.clone(), second_path]).unwrap();
+        let mut registry = LocalOfferRegistry::default();
+        let local = registry
+            .publish_tree(&tree, Duration::from_millis(250))
+            .unwrap();
+        let offered = SecureOfferedFile::from_local_offer(&local).unwrap();
+        let peers = peers();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        let manifest = client.fetch_manifest().unwrap();
+        let first = SecureRemoteSource::new_for_entry(
+            client.clone(),
+            manifest.clone(),
+            manifest.entries[0].clone(),
+        );
+        let mut bytes = [0; 5];
+        assert_eq!(first.read_at(0, &mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"first");
+        std::thread::sleep(Duration::from_millis(300));
+        registry
+            .publish(
+                FileSnapshot::capture(&first_path).unwrap(),
+                Duration::from_secs(30),
+            )
+            .unwrap();
+        assert!(local.source().read_at(0, &mut bytes).is_err());
+        let second = SecureRemoteSource::new_for_entry(
+            client,
+            manifest.clone(),
+            manifest.entries[1].clone(),
+        );
+        assert_eq!(second.read_at(0, &mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"later");
+        assert_eq!(first.read_at(0, &mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"first");
+        assert_eq!(server.metrics().unique_bytes, 10);
+        let files = server.file_progress();
+        assert_eq!(files[0].transferred, 5);
+        assert_eq!(files[1].transferred, 5);
+    }
+
+    #[test]
+    fn task_pause_and_resume_work_from_either_device_even_before_first_read() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = RemoteTransferRegistry::default();
+        registry.bind_task(client.clone(), manifest.offer_id);
+        registry.set_local_control(RemoteTransferState::Paused);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.control_handle().state() != RemoteTransferState::Paused
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.control_handle().state(), RemoteTransferState::Paused);
+        assert_eq!(server.metrics().begun_transfers, 0);
+        server.control_handle().set(RemoteTransferState::Running);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while registry.local_progress().paused && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!registry.local_progress().paused);
+        let source = registry.create_source(client.clone(), manifest.clone());
+        assert_eq!(source.read_at(0, &mut [0; 128]).unwrap(), 128);
+        server.control_handle().set(RemoteTransferState::Paused);
+        registry.set_local_control(RemoteTransferState::Running);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.control_handle().state() != RemoteTransferState::Running
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            server.control_handle().state(),
+            RemoteTransferState::Running
+        );
+        assert_eq!(source.read_at(128, &mut [0; 128]).unwrap(), 128);
+        assert!(
+            client
+                .task_control(ProtocolId([0x55; 16]), Some(RemoteTransferState::Cancelled))
+                .is_err()
+        );
+        assert_eq!(
+            server.control_handle().state(),
+            RemoteTransferState::Running
+        );
+        registry.set_local_control(RemoteTransferState::Cancelled);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.control_handle().state() != RemoteTransferState::Cancelled
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            server.control_handle().state(),
+            RemoteTransferState::Cancelled
+        );
+        assert_eq!(
+            client
+                .task_control(manifest.offer_id, Some(RemoteTransferState::Running))
+                .unwrap(),
+            RemoteTransferState::Cancelled
+        );
+    }
+
+    #[test]
+    fn receiver_observes_sender_pause_resume_and_cancellation() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = RemoteTransferRegistry::default();
+        let source = registry.create_source(client, manifest);
+        source.read_at(0, &mut [0; 128]).unwrap();
+        server.control_handle().set(RemoteTransferState::Paused);
+        let reader = Arc::clone(&source);
+        let worker = std::thread::spawn(move || reader.read_at(128, &mut [0; 128]));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !registry.local_progress().paused && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(registry.local_progress().paused);
+        assert_eq!(server.metrics().served_bytes, 128);
+        server.control_handle().set(RemoteTransferState::Running);
+        assert_eq!(worker.join().unwrap().unwrap(), 128);
+        assert!(!registry.local_progress().paused);
+        server.control_handle().set(RemoteTransferState::Cancelled);
+        assert_eq!(
+            source.read_at(256, &mut [0; 128]).unwrap_err().code(),
+            HRESULT::from_win32(ERROR_CANCELLED.0)
+        );
+        assert!(registry.local_progress().cancelled);
+    }
+
+    #[test]
+    fn sender_controls_gate_existing_and_future_files_without_overriding_receiver_pause() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client.clone(), manifest.clone());
+        let credentials = source.credentials_for_test().unwrap();
+        let control = server.control_handle();
+        control.set(RemoteTransferState::Paused);
+        let (status, bytes) = client
+            .read_range_interruptible(credentials, 0, 128, None, None)
+            .unwrap();
+        assert_eq!(status.state, RemoteTransferState::Paused);
+        assert!(bytes.is_empty());
+        assert_eq!(source.resume().unwrap().state, RemoteTransferState::Paused);
+        control.set(RemoteTransferState::Running);
+        source.pause().unwrap();
+        control.set(RemoteTransferState::Paused);
+        control.set(RemoteTransferState::Running);
+        assert_eq!(source.status().unwrap().state, RemoteTransferState::Paused);
+        source.resume().unwrap();
+        let mut bytes = [0; 128];
+        assert_eq!(source.read_at(0, &mut bytes).unwrap(), 128);
+        control.set(RemoteTransferState::Cancelled);
+        control.set(RemoteTransferState::Running);
+        assert_eq!(control.state(), RemoteTransferState::Cancelled);
+        assert!(source.read_at(128, &mut bytes).is_err());
+        let future = SecureRemoteSource::new(client, manifest);
+        assert!(future.read_at(0, &mut bytes).is_err());
+    }
+
+    #[test]
+    fn session_deadline_renews_with_progress_and_excludes_both_pauses() {
+        let (server, client, _) = start_generated(4096);
+        let source = SecureRemoteSource::new(client, server.manifest());
+        let credentials = source.credentials_for_test().unwrap();
+        let session = server
+            .state
+            .authenticated_session(server.state.authorized_peer, &credentials)
+            .unwrap();
+        let old = Instant::now()
+            .checked_sub(server.state.transfer_ttl + Duration::from_secs(1))
+            .unwrap();
+        *session.activity.lock().unwrap() = old;
+        *server.state.source_control.0.activity.lock().unwrap() = old;
+        assert!(server.state.session_expired(&session, Instant::now()));
+        session.paused.store(true, Ordering::Release);
+        assert!(!server.state.session_expired(&session, Instant::now()));
+        session.paused.store(false, Ordering::Release);
+        server.control_handle().set(RemoteTransferState::Paused);
+        *server.state.source_control.0.activity.lock().unwrap() = old;
+        assert!(!server.state.session_expired(&session, Instant::now()));
+        server.control_handle().set(RemoteTransferState::Running);
+        assert!(!server.state.session_expired(&session, Instant::now()));
+        assert_eq!(source.status().unwrap().state, RemoteTransferState::Running);
+        assert!(session.activity.lock().unwrap().elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn drag_image_is_exact_offer_bound_authenticated_and_does_not_read_file_content() {
+        let peers = peers();
+        let mut image = vec![0; 12];
+        image[..4].copy_from_slice(&1_i32.to_le_bytes());
+        image[4..8].copy_from_slice(&1_i32.to_le_bytes());
+        image[8..].copy_from_slice(&[12, 34, 56, 255]);
+        let offered = SecureOfferedFile::generated(
+            Arc::from("image-test.txt"),
+            1024,
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        .with_drag_image(image.clone())
+        .unwrap();
+        let id = offered.manifest().offer_id;
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_secs(30),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        assert_eq!(client.fetch_drag_image(id).unwrap(), image);
+        assert!(
+            client
+                .fetch_drag_image(ProtocolId::random().unwrap())
+                .is_err()
+        );
+        let other = SecureOfferClient::new(server.address(), peers.other_client);
+        assert!(other.fetch_drag_image(id).is_err());
+        assert_eq!(server.metrics().begun_transfers, 0);
+        assert_eq!(server.metrics().served_bytes, 0);
+    }
+
+    #[test]
+    fn authenticated_drag_target_location_returns_to_the_source_offer() {
+        let peers = peers();
+        let offered = SecureOfferedFile::generated(
+            Arc::from("target-path.txt"),
+            128,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let id = offered.manifest().offer_id;
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_secs(30),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        client
+            .report_target_location(id, r"C:\Users\Receiver\Desktop")
+            .unwrap();
+        assert_eq!(server.target_location(), r"C:\Users\Receiver\Desktop");
+        assert!(client.report_target_location(id, "relative").is_err());
+
+        let other = SecureOfferClient::new(server.address(), peers.other_client);
+        assert!(
+            other
+                .report_target_location(id, r"C:\Users\Intruder\Desktop")
+                .is_err()
+        );
+        assert_eq!(server.target_location(), r"C:\Users\Receiver\Desktop");
+    }
+
+    fn peers_with_timeout(timeout: Duration) -> TestPeers {
+        let (server_identity, server_certificate) = identity();
+        let (client_identity, client_certificate) = identity();
+        let (other_identity, _) = identity();
+        TestPeers {
+            server: PinnedTlsServer::new(
+                &server_identity,
+                client_certificate,
+                client_identity.fingerprint(),
+                timeout,
+            )
+            .unwrap(),
+            client: PinnedTlsClient::new(
+                &client_identity,
+                server_certificate.clone(),
+                server_identity.fingerprint(),
+                timeout,
+            )
+            .unwrap(),
+            other_client: PinnedTlsClient::new(
+                &other_identity,
+                server_certificate,
+                server_identity.fingerprint(),
+                timeout,
+            )
+            .unwrap(),
+        }
+    }
+
+    fn trusted_peers(timeout: Duration) -> TrustedTestPeers {
+        let server_directory = TestDirectory::new("trusted-server");
+        let authorized_directory = TestDirectory::new("trusted-authorized");
+        let other_directory = TestDirectory::new("trusted-other");
+        let server_store = DeviceStore::new(&server_directory.0);
+        let authorized_store = DeviceStore::new(&authorized_directory.0);
+        let other_store = DeviceStore::new(&other_directory.0);
+        let server_identity = server_store.load_or_create_identity().unwrap().identity;
+        let authorized_identity = authorized_store.load_or_create_identity().unwrap().identity;
+        let other_identity = other_store.load_or_create_identity().unwrap().identity;
+        let server_certificate = server_identity.certificate_der().to_vec();
+        let server_fingerprint = server_identity.fingerprint();
+        let authorized_certificate = authorized_identity.certificate_der().to_vec();
+        let authorized_fingerprint = authorized_identity.fingerprint();
+        let other_certificate = other_identity.certificate_der().to_vec();
+        let other_fingerprint = other_identity.fingerprint();
+        server_store
+            .trust_peer(
+                authorized_certificate,
+                authorized_fingerprint,
+                "Authorized PC",
+            )
+            .unwrap();
+        server_store
+            .trust_peer(other_certificate, other_fingerprint, "Other PC")
+            .unwrap();
+        let authorized = PinnedTlsClient::new(
+            &authorized_identity,
+            server_certificate.clone(),
+            server_fingerprint,
+            timeout,
+        )
+        .unwrap();
+        let other = PinnedTlsClient::new(
+            &other_identity,
+            server_certificate,
+            server_fingerprint,
+            timeout,
+        )
+        .unwrap();
+        let server = TrustedTlsServer::new(server_identity, server_store.clone(), timeout).unwrap();
+        TrustedTestPeers {
+            _server_directory: server_directory,
+            _authorized_directory: authorized_directory,
+            _other_directory: other_directory,
+            server_store,
+            server,
+            authorized,
+            other,
+            authorized_fingerprint,
+        }
+    }
+
+    fn start_generated(size: u64) -> (SecureOfferServer, SecureOfferClient, PinnedTlsClient) {
+        start_generated_with_timeouts(size, Duration::from_mins(1), Duration::from_secs(2))
+    }
+
+    fn start_generated_with_timeouts(
+        size: u64,
+        transfer_ttl: Duration,
+        request_timeout: Duration,
+    ) -> (SecureOfferServer, SecureOfferClient, PinnedTlsClient) {
+        let peers = peers();
+        let offered = SecureOfferedFile::generated(
+            Arc::from("Remote-Secure-Test.bin"),
+            size,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            transfer_ttl,
+            request_timeout,
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        (server, client, peers.other_client)
+    }
+
+    fn recovering_client(client: &SecureOfferClient, max_elapsed: Duration) -> SecureOfferClient {
+        SecureOfferClient::with_recovery_policy(
+            client.address,
+            client.tls.clone(),
+            SecureRecoveryPolicy {
+                max_elapsed,
+                connect_attempt_timeout: Duration::from_millis(50),
+                initial_backoff: Duration::from_millis(10),
+                max_backoff: Duration::from_millis(40),
+            },
+        )
+    }
+
+    #[test]
+    fn offer_metadata_is_authenticated_and_content_is_deferred_until_read() {
+        let (server, client, _) = start_generated(1024 * 1024);
+        let manifest = client.fetch_manifest().unwrap();
+        assert_eq!(
+            &*manifest.entries[0].descriptor.file_name,
+            "Remote-Secure-Test.bin"
+        );
+        assert_eq!(manifest.entries[0].descriptor.size, 1024 * 1024);
+        assert_eq!(server.metrics().begun_transfers, 0);
+        assert_eq!(server.metrics().read_requests, 0);
+
+        let source = SecureRemoteSource::new(client, manifest);
+        assert_eq!(source.read_calls(), 0);
+        let mut bytes = [0_u8; 257];
+        let read = source.read_at(7_777, &mut bytes).unwrap();
+        assert_eq!(read, bytes.len());
+        for (index, byte) in bytes.iter().enumerate() {
+            assert_eq!(*byte, generated_byte(7_777 + index as u64));
+        }
+        assert_eq!(server.metrics().begun_transfers, 1);
+        assert_eq!(server.metrics().read_requests, 1);
+        assert_eq!(server.metrics().unique_bytes, bytes.len() as u64);
+    }
+
+    #[test]
+    fn absolute_source_location_round_trips_with_the_authenticated_manifest() {
+        let peers = peers();
+        let offered =
+            SecureOfferedFile::generated(Arc::from("path-test.bin"), 32, Duration::from_mins(1))
+                .unwrap()
+                .with_source_location(r"C:\Users\Alice\Desktop".to_owned())
+                .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+
+        assert_eq!(
+            &*client.fetch_manifest().unwrap().source_location,
+            r"C:\Users\Alice\Desktop"
+        );
+    }
+
+    #[test]
+    fn cancel_before_first_read_blocks_future_sources_without_touching_other_tasks() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let cancelled = RemoteTransferRegistry::default();
+        cancelled.set_local_control(RemoteTransferState::Cancelled);
+        let source = cancelled.create_source(client.clone(), manifest.clone());
+        let mut bytes = [0_u8; 16];
+        assert!(source.read_at(0, &mut bytes).is_err());
+        assert_eq!(server.metrics().begun_transfers, 0);
+        let independent = RemoteTransferRegistry::default();
+        let other = independent.create_source(client, manifest);
+        assert_eq!(other.read_at(0, &mut bytes).unwrap(), 16);
+        assert!(!independent.local_progress().cancelled);
+    }
+
+    #[test]
+    fn file_cancellation_is_sticky_for_unopened_files_and_does_not_cancel_siblings() {
+        use crate::clipboard::product::ProductTransferState;
+        let peers = peers();
+        let content: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"abcdefgh"[..]));
+        let offered = SecureOfferedFile::new_tree(
+            vec![
+                (
+                    VirtualFileDescriptor::basic(Arc::from("one.bin"), 8),
+                    Some(Arc::clone(&content)),
+                ),
+                (
+                    VirtualFileDescriptor::basic(Arc::from("two.bin"), 8),
+                    Some(content),
+                ),
+            ],
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = RemoteTransferRegistry::default();
+        registry.cancel_files(&[manifest.entries[0].file_id.bytes()]);
+        let first = registry.create_source_for_entry(
+            client.clone(),
+            manifest.clone(),
+            manifest.entries[0].clone(),
+        );
+        let second =
+            registry.create_source_for_entry(client, manifest.clone(), manifest.entries[1].clone());
+        let mut bytes = [0_u8; 4];
+        assert_eq!(
+            first.read_at(0, &mut bytes).unwrap_err().code(),
+            HRESULT::from_win32(ERROR_CANCELLED.0)
+        );
+        assert_eq!(second.read_at(4, &mut bytes).unwrap(), 4);
+        let progress = registry.file_progress(&manifest);
+        assert_eq!(progress[0].state, ProductTransferState::Cancelled);
+        assert_eq!(
+            progress[1].transferred, 4,
+            "out-of-order ranges must not claim unread bytes"
+        );
+        assert_eq!(progress[1].state, ProductTransferState::Running);
+        assert_eq!(second.read_at(0, &mut bytes).unwrap(), 4);
+        assert_eq!(
+            registry.file_progress(&manifest)[1].state,
+            ProductTransferState::Completed
+        );
+        assert!(!registry.local_progress().cancelled);
+    }
+
+    #[test]
+    fn locally_paused_read_resumes_without_a_remote_pause_deadlock() {
+        // Keep the server alive while the paused reader waits.
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = Arc::new(RemoteTransferRegistry::default());
+        let source = registry.create_source(client, manifest);
+        registry.set_local_control(RemoteTransferState::Paused);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 16];
+            tx.send(source.read_at(0, &mut bytes).map_err(|error| error.code()))
+                .unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(40)).is_err());
+        assert_eq!(server.metrics().read_requests, 0);
+        registry.set_local_control(RemoteTransferState::Running);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap(),
+            16
+        );
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn secure_tree_manifest_defers_content_and_supports_independent_out_of_order_streams() {
+        let peers = peers();
+        let alpha: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"alpha"[..]));
+        let ferry: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"ferry"[..]));
+        let offered = SecureOfferedFile::new_tree(
+            vec![
+                (
+                    VirtualFileDescriptor {
+                        file_name: Arc::from("资料-🚢"),
+                        size: 0,
+                        attributes: FILE_ATTRIBUTE_DIRECTORY.0,
+                        creation_time: None,
+                        last_access_time: None,
+                        last_write_time: None,
+                    },
+                    None,
+                ),
+                (
+                    VirtualFileDescriptor::basic(Arc::from("资料-🚢\\alpha.txt"), 5),
+                    Some(alpha),
+                ),
+                (
+                    VirtualFileDescriptor {
+                        file_name: Arc::from("资料-🚢\\空目录"),
+                        size: 0,
+                        attributes: FILE_ATTRIBUTE_DIRECTORY.0,
+                        creation_time: None,
+                        last_access_time: None,
+                        last_write_time: None,
+                    },
+                    None,
+                ),
+                (
+                    VirtualFileDescriptor::basic(Arc::from("emoji-🚢.bin"), 5),
+                    Some(ferry),
+                ),
+            ],
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+
+        let manifest = client.fetch_manifest().unwrap();
+        assert_eq!(manifest.entries.len(), 4);
+        assert_eq!(server.metrics().begun_transfers, 0);
+        assert_eq!(server.metrics().read_requests, 0);
+        let Err(directory_error) = client.begin_transfer(&manifest, &manifest.entries[0]) else {
+            panic!("directory unexpectedly opened a content transfer");
+        };
+        assert_eq!(directory_error.kind(), io::ErrorKind::PermissionDenied);
+
+        let registry = RemoteTransferRegistry::default();
+        let alpha_source = registry.create_source_for_entry(
+            client.clone(),
+            manifest.clone(),
+            manifest.entries[1].clone(),
+        );
+        let ferry_source =
+            registry.create_source_for_entry(client, manifest.clone(), manifest.entries[3].clone());
+        let ferry_thread = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 5];
+            assert_eq!(ferry_source.read_at(0, &mut bytes).unwrap(), 5);
+            bytes
+        });
+        let alpha_thread = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 5];
+            assert_eq!(alpha_source.read_at(0, &mut bytes).unwrap(), 5);
+            bytes
+        });
+        assert_eq!(&ferry_thread.join().unwrap(), b"ferry");
+        assert_eq!(&alpha_thread.join().unwrap(), b"alpha");
+
+        let status = registry.status_all().unwrap();
+        assert_eq!(status.started_transfers, 2);
+        assert_eq!(status.unique_bytes, 10);
+        assert_eq!(status.read_calls, 2);
+        assert_eq!(status.bytes_read, 10);
+        assert_eq!(server.metrics().begun_transfers, 2);
+        assert_eq!(server.metrics().read_requests, 2);
+        assert_eq!(server.metrics().unique_bytes, 10);
+    }
+
+    #[test]
+    fn completed_file_sessions_remain_observable_after_later_files_begin() {
+        let peers = peers();
+        let first: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"first"[..]));
+        let second: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"second"[..]));
+        let offered = SecureOfferedFile::new_tree(
+            vec![
+                (
+                    VirtualFileDescriptor::basic(Arc::from("first.txt"), 5),
+                    Some(first),
+                ),
+                (
+                    VirtualFileDescriptor::basic(Arc::from("second.txt"), 6),
+                    Some(second),
+                ),
+            ],
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = RemoteTransferRegistry::default();
+        let first = registry.create_source_for_entry(
+            client.clone(),
+            manifest.clone(),
+            manifest.entries[0].clone(),
+        );
+        let second =
+            registry.create_source_for_entry(client, manifest.clone(), manifest.entries[1].clone());
+
+        let mut first_bytes = [0_u8; 5];
+        assert_eq!(first.read_at(0, &mut first_bytes).unwrap(), 5);
+        let mut eof = [0_u8; 1];
+        assert_eq!(first.read_at(5, &mut eof).unwrap(), 0);
+        assert_eq!(
+            first.status().unwrap().state,
+            RemoteTransferState::Completed
+        );
+
+        let mut second_bytes = [0_u8; 6];
+        assert_eq!(second.read_at(0, &mut second_bytes).unwrap(), 6);
+        assert_eq!(second.read_at(6, &mut eof).unwrap(), 0);
+
+        let mut reread = [0_u8; 1];
+        assert_eq!(first.read_at(0, &mut reread).unwrap(), 1);
+        assert_eq!(reread, [b'f']);
+        let status = registry.status_all().unwrap();
+        assert_eq!(status.state, RemoteTransferState::Completed);
+        assert_eq!(status.started_transfers, 2);
+        assert_eq!(status.unique_bytes, 11);
+        assert_eq!(server.metrics().unique_bytes, 11);
+        assert_eq!(server.metrics().denied_requests, 0);
+    }
+
+    #[test]
+    fn group_pause_resume_and_cancel_apply_to_every_started_file_stream() {
+        let peers = peers();
+        let first: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"first"[..]));
+        let second: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"second"[..]));
+        let offered = SecureOfferedFile::new_tree(
+            vec![
+                (
+                    VirtualFileDescriptor::basic(Arc::from("first.txt"), 5),
+                    Some(first),
+                ),
+                (
+                    VirtualFileDescriptor::basic(Arc::from("second.txt"), 6),
+                    Some(second),
+                ),
+            ],
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = RemoteTransferRegistry::default();
+        let first = registry.create_source_for_entry(
+            client.clone(),
+            manifest.clone(),
+            manifest.entries[0].clone(),
+        );
+        let second =
+            registry.create_source_for_entry(client, manifest.clone(), manifest.entries[1].clone());
+        let mut byte = [0_u8; 1];
+        first.read_at(0, &mut byte).unwrap();
+        second.read_at(0, &mut byte).unwrap();
+
+        let paused = registry.pause_all().unwrap();
+        assert_eq!(paused.state, RemoteTransferState::Paused);
+        assert_eq!(paused.started_transfers, 2);
+        let running = registry.resume_all().unwrap();
+        assert_eq!(running.state, RemoteTransferState::Running);
+        let cancelled = registry.cancel_all().unwrap();
+        assert_eq!(cancelled.state, RemoteTransferState::Cancelled);
+        assert_eq!(server.metrics().cancelled_transfers, 2);
+        let error = first.read_at(1, &mut byte).unwrap_err();
+        assert_eq!(error.code(), HRESULT::from_win32(ERROR_CANCELLED.0));
+    }
+
+    #[test]
+    fn sequential_commands_reuse_bounded_tls_connections() {
+        let length = 2_u64 * 1024 * 1024;
+        let (server, client, _) = start_generated(length);
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client, manifest);
+        let mut bytes = vec![0_u8; MAX_SECURE_RANGE_BYTES];
+
+        for offset in (0..length).step_by(MAX_SECURE_RANGE_BYTES) {
+            assert_eq!(
+                source.read_at(offset, &mut bytes).unwrap(),
+                MAX_SECURE_RANGE_BYTES
+            );
+        }
+        assert_eq!(source.status().unwrap().unique_bytes, length);
+        assert_eq!(source.pause().unwrap().state, RemoteTransferState::Paused);
+        assert_eq!(source.resume().unwrap().state, RemoteTransferState::Running);
+        assert_eq!(
+            source.complete().unwrap().state,
+            RemoteTransferState::Completed
+        );
+
+        let metrics = server.metrics();
+        assert_eq!(metrics.accepted_connections, 2);
+        assert_eq!(
+            metrics.read_requests,
+            length / MAX_SECURE_RANGE_BYTES as u64
+        );
+        assert_eq!(metrics.protocol_errors, 0);
+
+        drop(source);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.workers.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.workers.load(Ordering::Acquire), 0);
+        assert_eq!(server.metrics().protocol_errors, 0);
+    }
+
+    #[test]
+    fn persistent_control_connection_outlives_the_tls_io_timeout() {
+        let peers = peers_with_timeout(Duration::from_millis(250));
+        let offered = SecureOfferedFile::generated(
+            Arc::from("Remote-Secure-Test.bin"),
+            4096,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server,
+            offered,
+            Duration::from_secs(2),
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.client);
+
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client, manifest);
+        let mut bytes = [0_u8; 256];
+        source.read_at(0, &mut bytes).unwrap();
+        std::thread::sleep(Duration::from_millis(750));
+        assert_eq!(source.status().unwrap().unique_bytes, 256);
+        source.read_at(256, &mut bytes).unwrap();
+
+        assert_eq!(server.metrics().accepted_connections, 2);
+        assert_eq!(server.metrics().protocol_errors, 0);
+    }
+
+    #[test]
+    fn repeated_streams_receive_distinct_transfer_ids() {
+        let (_server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let first = SecureRemoteSource::new(client.clone(), manifest.clone());
+        let second = SecureRemoteSource::new(client, manifest);
+        let first_credentials = first.credentials_for_test().unwrap();
+        let second_credentials = second.credentials_for_test().unwrap();
+        assert_ne!(
+            first_credentials.transfer_id,
+            second_credentials.transfer_id
+        );
+        assert_ne!(first_credentials.capability, second_credentials.capability);
+    }
+
+    #[test]
+    fn replayed_control_sequence_and_modified_capability_are_denied() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client.clone(), manifest);
+        let credentials = source.credentials_for_test().unwrap();
+        assert_eq!(
+            client.control(credentials, 1, Opcode::Pause).unwrap().state,
+            RemoteTransferState::Paused
+        );
+        assert_eq!(
+            client.control(credentials, 1, Opcode::Pause).unwrap().state,
+            RemoteTransferState::Paused
+        );
+        let replay = client.control(credentials, 1, Opcode::Resume).unwrap_err();
+        assert_eq!(replay.kind(), io::ErrorKind::PermissionDenied);
+
+        let mut forged = credentials;
+        forged.capability[0] ^= 0x80;
+        let denied = client.status(forged).unwrap_err();
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        let metrics = server.metrics();
+        assert_eq!(metrics.replayed_requests, 1);
+        assert_eq!(metrics.denied_requests, 1);
+    }
+
+    #[test]
+    fn repeated_begin_nonce_is_idempotent_for_the_same_offer() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(&manifest.offer_id.0);
+        payload.extend_from_slice(&manifest.entries[0].file_id.0);
+        payload.extend_from_slice(&[0xA5; 32]);
+
+        let first = client
+            .command(Opcode::BeginTransfer, payload.clone())
+            .unwrap();
+        require_ok(&first).unwrap();
+        let repeated = client.command(Opcode::BeginTransfer, payload).unwrap();
+        require_ok(&repeated).unwrap();
+        assert_eq!(&first[..113], &repeated[..113]);
+        assert!(
+            u64::from_be_bytes(array_at_io(&repeated, 113).unwrap())
+                <= u64::from_be_bytes(array_at_io(&first, 113).unwrap())
+        );
+        assert_eq!(server.metrics().begun_transfers, 1);
+        assert_eq!(server.metrics().replayed_requests, 0);
+    }
+
+    #[test]
+    fn lost_begin_response_reconnects_without_creating_a_second_session() {
+        let (server, base_client, _) = start_generated(4096);
+        let client = recovering_client(&base_client, Duration::from_secs(1));
+        let manifest = client.fetch_manifest().unwrap();
+        server.inject_response_drops(1);
+
+        let source = SecureRemoteSource::new(client.clone(), manifest);
+        let credentials = source.credentials_for_test().unwrap();
+        assert_ne!(credentials.transfer_id.0, [0; 16]);
+
+        let server_metrics = server.metrics();
+        let recovery = client.recovery_snapshot();
+        assert_eq!(server_metrics.begun_transfers, 1);
+        assert_eq!(server_metrics.replayed_requests, 0);
+        assert_eq!(recovery.reconnect_attempts, 1);
+        assert_eq!(recovery.recovered_commands, 1);
+        assert_eq!(recovery.exhausted_commands, 0);
+    }
+
+    #[test]
+    fn lost_range_response_retries_the_same_offset_without_double_counting_progress() {
+        let (server, base_client, _) = start_generated(4096);
+        let client = recovering_client(&base_client, Duration::from_secs(1));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client.clone(), manifest);
+        source.credentials_for_test().unwrap();
+        server.inject_response_drops(1);
+
+        let mut bytes = [0_u8; 4096];
+        assert_eq!(source.read_at(0, &mut bytes).unwrap(), bytes.len());
+        assert_eq!(bytes[0], generated_byte(0));
+        assert_eq!(bytes[4095], generated_byte(4095));
+
+        let server_metrics = server.metrics();
+        let recovery = client.recovery_snapshot();
+        assert_eq!(server_metrics.read_requests, 2);
+        assert_eq!(server_metrics.served_bytes, 8192);
+        assert_eq!(server_metrics.unique_bytes, 4096);
+        assert_eq!(source.bytes_read(), 4096);
+        assert_eq!(recovery.recovered_commands, 1);
+    }
+
+    #[test]
+    fn lost_control_response_reuses_the_same_sequence_idempotently() {
+        let (server, base_client, _) = start_generated(4096);
+        let client = recovering_client(&base_client, Duration::from_secs(1));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client.clone(), manifest);
+        let mut byte = [0_u8; 1];
+        source.read_at(0, &mut byte).unwrap();
+
+        server.inject_response_drops(1);
+        assert_eq!(source.pause().unwrap().state, RemoteTransferState::Paused);
+        server.inject_response_drops(1);
+        assert_eq!(source.resume().unwrap().state, RemoteTransferState::Running);
+        server.inject_response_drops(1);
+        assert_eq!(
+            source.complete().unwrap().state,
+            RemoteTransferState::Completed
+        );
+
+        assert_eq!(server.metrics().replayed_requests, 0);
+        assert_eq!(client.recovery_snapshot().recovered_commands, 3);
+    }
+
+    #[test]
+    fn status_discards_a_stale_control_connection_and_retries_once() {
+        let (server, base_client, _) = start_generated(4096);
+        let client = recovering_client(&base_client, Duration::from_secs(1));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client.clone(), manifest);
+        let mut byte = [0_u8; 1];
+        source.read_at(0, &mut byte).unwrap();
+
+        server.inject_response_drops(1);
+        let status = source.status().unwrap();
+        assert_eq!(status.state, RemoteTransferState::Running);
+        assert_eq!(status.unique_bytes, 1);
+
+        let recovery = client.recovery_snapshot();
+        assert_eq!(recovery.transient_failures, 1);
+        assert_eq!(recovery.reconnect_attempts, 1);
+        assert_eq!(recovery.recovered_commands, 1);
+        assert_eq!(recovery.exhausted_commands, 0);
+        assert_eq!(recovery.active_recoveries, 0);
+    }
+
+    #[test]
+    fn recovery_exhaustion_is_bounded_and_maps_to_a_windows_timeout() {
+        let (mut server, base_client, _) =
+            start_generated_with_timeouts(4096, Duration::from_secs(2), Duration::from_millis(100));
+        let client = recovering_client(&base_client, Duration::from_millis(150));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client.clone(), manifest);
+        source.credentials_for_test().unwrap();
+        server.stop();
+
+        let started = Instant::now();
+        let mut bytes = [0_u8; 32];
+        let error = source.read_at(0, &mut bytes).unwrap_err();
+        assert_eq!(error.code(), HRESULT::from_win32(ERROR_TIMEOUT.0));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let recovery = client.recovery_snapshot();
+        assert!(recovery.reconnect_attempts >= 2);
+        assert_eq!(recovery.recovered_commands, 0);
+        assert_eq!(recovery.exhausted_commands, 1);
+        assert_eq!(recovery.active_recoveries, 0);
+    }
+
+    #[test]
+    fn cancellation_interrupts_an_active_network_recovery_wait() {
+        let (mut server, base_client, _) =
+            start_generated_with_timeouts(4096, Duration::from_secs(2), Duration::from_millis(100));
+        let client = recovering_client(&base_client, Duration::from_secs(2));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = Arc::new(SecureRemoteSource::new(client.clone(), manifest));
+        source.credentials_for_test().unwrap();
+        server.stop();
+
+        let worker_source = Arc::clone(&source);
+        let worker = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 32];
+            worker_source.read_at(0, &mut bytes)
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while client.recovery_snapshot().active_recoveries == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(client.recovery_snapshot().active_recoveries, 1);
+        source.group_cancelled.store(true, Ordering::Release);
+
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), HRESULT::from_win32(ERROR_CANCELLED.0));
+        assert_eq!(client.recovery_snapshot().active_recoveries, 0);
+        assert_eq!(client.recovery_snapshot().exhausted_commands, 0);
+    }
+
+    #[test]
+    fn paused_transfer_survives_a_lost_data_connection_and_resumes() {
+        let (server, base_client, _) =
+            start_generated_with_timeouts(4096, Duration::from_secs(2), Duration::from_millis(25));
+        let client = recovering_client(&base_client, Duration::from_secs(1));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = Arc::new(SecureRemoteSource::new(client.clone(), manifest));
+        let mut first = [0_u8; 1];
+        source.read_at(0, &mut first).unwrap();
+        assert_eq!(source.pause().unwrap().state, RemoteTransferState::Paused);
+        server.inject_response_drops(1);
+
+        let worker_source = Arc::clone(&source);
+        let worker = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 32];
+            worker_source
+                .read_at(1, &mut bytes)
+                .map(|read| (read, bytes))
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while server.metrics().accepted_connections < 3 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(server.metrics().accepted_connections >= 3);
+        assert_eq!(source.status().unwrap().state, RemoteTransferState::Paused);
+        assert_eq!(source.resume().unwrap().state, RemoteTransferState::Running);
+
+        let (read, bytes) = worker.join().unwrap().unwrap();
+        assert_eq!(read, bytes.len());
+        assert_eq!(bytes[0], generated_byte(1));
+        assert_eq!(client.recovery_snapshot().recovered_commands, 1);
+        assert_eq!(client.recovery_snapshot().exhausted_commands, 0);
+    }
+
+    #[test]
+    fn group_cancel_returns_locally_when_the_source_is_offline() {
+        let (mut server, base_client, _) =
+            start_generated_with_timeouts(4096, Duration::from_secs(2), Duration::from_millis(100));
+        let client = recovering_client(&base_client, Duration::from_secs(2));
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = Arc::new(RemoteTransferRegistry::default());
+        let source = registry.create_source(client.clone(), manifest);
+        source.credentials_for_test().unwrap();
+        server.stop();
+
+        let worker_source = Arc::clone(&source);
+        let worker = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 32];
+            worker_source.read_at(0, &mut bytes)
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while client.recovery_snapshot().active_recoveries == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(client.recovery_snapshot().active_recoveries, 1);
+
+        let started = Instant::now();
+        let cancelled = registry.cancel_all().unwrap();
+        assert_eq!(cancelled.state, RemoteTransferState::Cancelled);
+        assert!(!cancelled.remote_acknowledged);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let error = worker.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), HRESULT::from_win32(ERROR_CANCELLED.0));
+        assert_eq!(client.recovery_snapshot().active_recoveries, 0);
+    }
+
+    #[test]
+    fn expired_sessions_are_cleaned_without_a_later_begin_request() {
+        let (server, client, _) = start_generated_with_timeouts(
+            4096,
+            Duration::from_millis(100),
+            Duration::from_millis(25),
+        );
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client, manifest);
+        source.credentials_for_test().unwrap();
+        assert_eq!(server.state.inner.lock().unwrap().transfers.len(), 1);
+        assert_eq!(server.state.inner.lock().unwrap().begin_nonces.len(), 1);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !server.state.inner.lock().unwrap().transfers.is_empty() && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let inner = server.state.inner.lock().unwrap();
+        assert!(inner.transfers.is_empty());
+        assert!(inner.begin_nonces.is_empty());
+    }
+
+    #[test]
+    fn pause_resume_cancel_and_unique_progress_are_server_authoritative() {
+        let (server, client, _) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client, manifest);
+        let mut bytes = [0_u8; 256];
+        source.read_at(0, &mut bytes).unwrap();
+        source.read_at(128, &mut bytes).unwrap();
+        assert_eq!(source.status().unwrap().unique_bytes, 384);
+        assert_eq!(source.pause().unwrap().state, RemoteTransferState::Paused);
+        assert_eq!(source.resume().unwrap().state, RemoteTransferState::Running);
+        assert_eq!(
+            source.cancel().unwrap().state,
+            RemoteTransferState::Cancelled
+        );
+        let error = source.read_at(0, &mut bytes).unwrap_err();
+        assert_eq!(error.code(), HRESULT::from_win32(ERROR_CANCELLED.0));
+        assert_eq!(server.metrics().cancelled_transfers, 1);
+        assert_eq!(server.metrics().active_reads, 0);
+    }
+
+    #[test]
+    fn a_long_pause_is_polled_without_returning_false_eof() {
+        let (server, client, _) =
+            start_generated_with_timeouts(4096, Duration::from_secs(5), Duration::from_millis(25));
+        let client = recovering_client(&client, Duration::from_secs(2));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = Arc::new(SecureRemoteSource::new(client, manifest));
+        let mut first = [0_u8; 1];
+        source.read_at(0, &mut first).unwrap();
+        assert_eq!(source.pause().unwrap().state, RemoteTransferState::Paused);
+
+        let worker_source = Arc::clone(&source);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 32];
+            sender
+                .send(
+                    worker_source
+                        .read_at(1, &mut bytes)
+                        .map(|read| (read, bytes)),
+                )
+                .unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(receiver.try_recv().is_err());
+        assert!(server.metrics().read_requests >= 3);
+
+        assert_eq!(source.resume().unwrap().state, RemoteTransferState::Running);
+        let (read, bytes) = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, bytes.len());
+        assert_eq!(bytes[0], generated_byte(1));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_paused_read_survives_the_initial_transfer_ttl_and_resumes() {
+        let (server, client, _) = start_generated_with_timeouts(
+            4096,
+            Duration::from_millis(100),
+            Duration::from_millis(25),
+        );
+        let client = recovering_client(&client, Duration::from_secs(2));
+        let manifest = client.fetch_manifest().unwrap();
+        let source = Arc::new(SecureRemoteSource::new(client, manifest));
+        let mut first = [0_u8; 1];
+        source.read_at(0, &mut first).unwrap();
+        source.pause().unwrap();
+
+        let worker_source = Arc::clone(&source);
+        let worker = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 32];
+            worker_source.read_at(1, &mut bytes)
+        });
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(server.metrics().served_bytes, 1);
+        source.resume().unwrap();
+        assert_eq!(worker.join().unwrap().unwrap(), 32);
+        assert_eq!(server.metrics().served_bytes, 33);
+        assert_eq!(server.metrics().active_reads, 0);
+    }
+
+    #[test]
+    fn completed_transfer_allows_repeated_eof_and_seeked_rereads() {
+        let (server, client, _) = start_generated(32);
+        let manifest = client.fetch_manifest().unwrap();
+        let registry = RemoteTransferRegistry::default();
+        let source = registry.create_source(client, manifest);
+
+        let mut contents = [0_u8; 32];
+        assert_eq!(source.read_at(0, &mut contents).unwrap(), contents.len());
+        assert_eq!(contents[0], generated_byte(0));
+        assert_eq!(contents[31], generated_byte(31));
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(source.read_at(32, &mut byte).unwrap(), 0);
+        assert_eq!(source.read_at(32, &mut byte).unwrap(), 0);
+        assert_eq!(
+            source.status().unwrap().state,
+            RemoteTransferState::Completed
+        );
+
+        let mut reread = [0_u8; 4];
+        assert_eq!(source.read_at(7, &mut reread).unwrap(), reread.len());
+        assert_eq!(
+            reread,
+            std::array::from_fn(|index| generated_byte(7 + index as u64))
+        );
+        assert_eq!(source.status().unwrap().unique_bytes, 32);
+        assert_eq!(server.metrics().begun_transfers, 1);
+        assert_eq!(server.metrics().denied_requests, 0);
+
+        drop(source);
+        assert_eq!(registry.live_sources(), 1);
+        assert_eq!(
+            registry.latest_started().unwrap().status().unwrap().state,
+            RemoteTransferState::Completed
+        );
+    }
+
+    #[test]
+    fn another_client_cannot_reuse_a_transfer_because_mutual_tls_fails_first() {
+        let (server, client, other_tls) = start_generated(4096);
+        let manifest = client.fetch_manifest().unwrap();
+        let source = SecureRemoteSource::new(client, manifest);
+        let _credentials = source.credentials_for_test().unwrap();
+
+        let result = other_tls.connect(server.address()).and_then(|mut stream| {
+            stream.write_all(b"not a protocol frame")?;
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte)
+        });
+        assert!(result.is_err());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.metrics().tls_failures == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(server.metrics().tls_failures >= 1);
+    }
+
+    #[test]
+    fn trusted_but_offer_unauthorized_device_is_denied_after_mutual_tls() {
+        let peers = trusted_peers(Duration::from_secs(3));
+        let offered = SecureOfferedFile::generated(
+            Arc::from("Remote-Secure-Test.bin"),
+            4096,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start_trusted(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server.clone(),
+            peers.authorized_fingerprint,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let authorized = SecureOfferClient::new(server.address(), peers.authorized.clone());
+        let other = SecureOfferClient::new(server.address(), peers.other.clone());
+        assert_eq!(
+            authorized.fetch_manifest().unwrap().entries[0]
+                .descriptor
+                .size,
+            4096
+        );
+        assert!(other.fetch_manifest().is_err());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.metrics().denied_requests == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let metrics = server.metrics();
+        assert!(metrics.denied_requests >= 1);
+        assert_eq!(metrics.tls_failures, 0);
+        assert_eq!(metrics.protocol_errors, 0);
+        assert_eq!(metrics.begun_transfers, 0);
+    }
+
+    #[test]
+    fn revocation_interrupts_a_paused_read_on_existing_tls_connections() {
+        let peers = trusted_peers(Duration::from_secs(3));
+        let offered = SecureOfferedFile::generated(
+            Arc::from("Remote-Secure-Test.bin"),
+            4096,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start_trusted(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server.clone(),
+            peers.authorized_fingerprint,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.authorized.clone());
+        let manifest = client.fetch_manifest().unwrap();
+        let source = Arc::new(SecureRemoteSource::new(client, manifest));
+        let mut first = [0_u8; 256];
+        assert_eq!(source.read_at(0, &mut first).unwrap(), first.len());
+        assert_eq!(source.pause().unwrap().state, RemoteTransferState::Paused);
+
+        let reader = Arc::clone(&source);
+        let read = std::thread::spawn(move || {
+            let mut bytes = [0_u8; 256];
+            reader.read_at(256, &mut bytes)
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.metrics().read_requests < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(server.metrics().read_requests >= 2);
+        peers
+            .server_store
+            .revoke_peer(peers.authorized_fingerprint)
+            .unwrap();
+        assert!(read.join().unwrap().is_err());
+        assert!(source.status().is_err());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (server.metrics().active_reads != 0 || server.metrics().cancelled_transfers == 0)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let metrics = server.metrics();
+        assert_eq!(metrics.active_reads, 0);
+        assert_eq!(metrics.cancelled_transfers, 1);
+        assert!(metrics.denied_requests >= 1);
+        assert_eq!(metrics.tls_failures, 0);
+        assert_eq!(metrics.protocol_errors, 0);
+    }
+
+    #[test]
+    fn revoked_peer_cannot_open_a_new_tls_connection() {
+        let peers = trusted_peers(Duration::from_secs(3));
+        let offered = SecureOfferedFile::generated(
+            Arc::from("Remote-Secure-Test.bin"),
+            4096,
+            Duration::from_mins(1),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start_trusted(
+            "127.0.0.1:0".parse().unwrap(),
+            peers.server.clone(),
+            peers.authorized_fingerprint,
+            offered,
+            Duration::from_mins(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        peers
+            .server_store
+            .revoke_peer(peers.authorized_fingerprint)
+            .unwrap();
+        let client = SecureOfferClient::new(server.address(), peers.authorized.clone());
+        assert!(client.fetch_manifest().is_err());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.metrics().tls_failures == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let metrics = server.metrics();
+        assert!(metrics.tls_failures >= 1);
+        assert_eq!(metrics.begun_transfers, 0);
+        assert_eq!(metrics.protocol_errors, 0);
+    }
+
+    #[test]
+    fn malformed_plaintext_client_never_reaches_the_protocol() {
+        let (server, _client, _) = start_generated(4096);
+        let mut socket = TcpStream::connect(server.address()).unwrap();
+        socket.write_all(b"CFS4 plaintext").unwrap();
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.metrics().tls_failures == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(server.metrics().tls_failures >= 1);
+        assert_eq!(server.metrics().begun_transfers, 0);
+    }
+
+    #[test]
+    fn authenticated_partial_frame_disconnect_does_not_poison_the_server() {
+        let (server, client, _) = start_generated(4096);
+        let mut stream = client.tls.connect(client.address).unwrap();
+        write_frame(
+            &mut stream,
+            Frame {
+                opcode: Opcode::Hello as u16,
+                request_id: 77,
+                payload: {
+                    let mut payload = vec![HELLO_ROLE_RECEIVER];
+                    payload.extend_from_slice(&[0x5A; 32]);
+                    payload
+                },
+            },
+        )
+        .unwrap();
+        let hello_ack = read_frame(&mut stream).unwrap();
+        assert_eq!(hello_ack.opcode, response_opcode(Opcode::Hello));
+
+        let mut incomplete_header = [0_u8; FRAME_HEADER_LEN];
+        incomplete_header[..4].copy_from_slice(&MAGIC);
+        incomplete_header[4..6].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        incomplete_header[6..8].copy_from_slice(&(Opcode::GetOffer as u16).to_be_bytes());
+        stream.write_all(&incomplete_header[..10]).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.workers.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.metrics().protocol_errors, 0);
+        assert_eq!(
+            client.fetch_manifest().unwrap().entries[0].descriptor.size,
+            4096
+        );
+    }
+
+    #[test]
+    fn receiver_manifest_decoder_rejects_malicious_metadata_before_exposing_it_to_shell() {
+        let (server, _client, _) = start_generated(4096);
+        let valid = encode_manifest_response(&server.state, &[]).unwrap();
+        let decoded = SecureOfferClient::decode_manifest_response(&valid).unwrap();
+        assert_eq!(decoded.entries.len(), 1);
+
+        let mut corpus = Vec::new();
+        let mut zero_ttl = valid.clone();
+        zero_ttl[17..25].fill(0);
+        corpus.push(zero_ttl);
+
+        let mut zero_items = valid.clone();
+        zero_items[25..29].fill(0);
+        corpus.push(zero_items);
+
+        let mut oversized_source_location = valid.clone();
+        oversized_source_location[29..33].copy_from_slice(&u32::MAX.to_be_bytes());
+        corpus.push(oversized_source_location);
+
+        let time_flags_offset = MANIFEST_HEADER_LEN + 16 + 8 + 4;
+        let mut invalid_time_flags = valid.clone();
+        invalid_time_flags[time_flags_offset] = 0x80;
+        corpus.push(invalid_time_flags);
+
+        let name_length_offset = time_flags_offset + 1 + 24;
+        let name_offset = name_length_offset + 2;
+        let mut trailing_dot_path = valid.clone();
+        *trailing_dot_path.last_mut().unwrap() = b'.';
+        corpus.push(trailing_dot_path);
+
+        let mut truncated_name = valid.clone();
+        let name_length = u16::from_be_bytes(
+            truncated_name[name_length_offset..name_offset]
+                .try_into()
+                .unwrap(),
+        );
+        truncated_name[name_length_offset..name_offset]
+            .copy_from_slice(&name_length.saturating_add(1).to_be_bytes());
+        corpus.push(truncated_name);
+
+        let mut trailing_bytes = valid.clone();
+        trailing_bytes.push(0);
+        corpus.push(trailing_bytes);
+
+        let mut oversized = valid;
+        oversized.resize(MAX_SECURE_MANIFEST_BYTES + 1, 0);
+        corpus.push(oversized);
+
+        for malformed in corpus {
+            assert!(SecureOfferClient::decode_manifest_response(&malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_frame_corpus_is_bounded_and_rejected() {
+        let mut corpus = Vec::new();
+
+        for length in 1..FRAME_HEADER_LEN {
+            corpus.push(vec![0_u8; length]);
+        }
+
+        let mut invalid_magic = [0_u8; FRAME_HEADER_LEN];
+        invalid_magic[..4].copy_from_slice(b"NOPE");
+        invalid_magic[4..6].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        corpus.push(invalid_magic.to_vec());
+
+        let mut invalid_version = [0_u8; FRAME_HEADER_LEN];
+        invalid_version[..4].copy_from_slice(&MAGIC);
+        invalid_version[4..6].copy_from_slice(&PROTOCOL_VERSION.wrapping_add(1).to_be_bytes());
+        corpus.push(invalid_version.to_vec());
+
+        let mut oversized = [0_u8; FRAME_HEADER_LEN];
+        oversized[..4].copy_from_slice(&MAGIC);
+        oversized[4..6].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        oversized[16..20]
+            .copy_from_slice(&(u32::try_from(MAX_FRAME_PAYLOAD).unwrap() + 1).to_be_bytes());
+        corpus.push(oversized.to_vec());
+
+        let mut missing_payload = [0_u8; FRAME_HEADER_LEN];
+        missing_payload[..4].copy_from_slice(&MAGIC);
+        missing_payload[4..6].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        missing_payload[16..20].copy_from_slice(&16_u32.to_be_bytes());
+        corpus.push(missing_payload.to_vec());
+
+        for bytes in corpus {
+            let error = read_frame(&mut bytes.as_slice()).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+            ));
+        }
+    }
+
+    #[test]
+    fn secure_frame_parser_survives_a_deterministic_mutation_sweep() {
+        let mut state = 0xD1B5_4A32_D192_ED03_u64;
+        let mut accepted = 0_usize;
+        let mut rejected = 0_usize;
+
+        for case in 0..2048_u64 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let actual_length = usize::try_from(state & 0x0FFF).unwrap();
+            let mut bytes = vec![0_u8; FRAME_HEADER_LEN + actual_length];
+            bytes[..4].copy_from_slice(&MAGIC);
+            bytes[4..6].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+            let opcode = u16::try_from(state & u64::from(u16::MAX)).unwrap();
+            bytes[6..8].copy_from_slice(&opcode.to_be_bytes());
+            bytes[8..16].copy_from_slice(&state.to_be_bytes());
+            for (index, byte) in bytes[FRAME_HEADER_LEN..].iter_mut().enumerate() {
+                *byte = u8::try_from(
+                    state.rotate_left(u32::try_from(index % 64).unwrap()) & u64::from(u8::MAX),
+                )
+                .unwrap();
+            }
+
+            let declared_length = match case % 5 {
+                0 => u32::try_from(actual_length).unwrap(),
+                1 => u32::try_from(actual_length + 1).unwrap(),
+                2 => {
+                    bytes[usize::try_from(case).unwrap() % 4] ^= 0x80;
+                    u32::try_from(actual_length).unwrap()
+                }
+                3 => {
+                    bytes[4] ^= 0x40;
+                    u32::try_from(actual_length).unwrap()
+                }
+                _ => u32::try_from(MAX_FRAME_PAYLOAD).unwrap() + 1,
+            };
+            bytes[16..20].copy_from_slice(&declared_length.to_be_bytes());
+
+            match read_frame(&mut bytes.as_slice()) {
+                Ok(frame) => {
+                    accepted += 1;
+                    assert_eq!(frame.payload.len(), actual_length);
+                }
+                Err(error) => {
+                    rejected += 1;
+                    assert!(matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                    ));
+                }
+            }
+        }
+
+        assert!(accepted > 0);
+        assert!(rejected > 0);
+    }
+}

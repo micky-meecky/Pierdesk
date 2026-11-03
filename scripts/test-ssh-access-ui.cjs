@@ -1,0 +1,24 @@
+// Read-only view tests; no browser, network, Windows settings or desktop input.
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const model = {language:'zh',ssh:{data:{incoming:[],outgoing:[]},server:{installed:true,running:true,loopbackOnly:false,firewall:'configured',accounts:[],hostKeys:['public-key']}}};
+const context = vm.createContext({currentModel:()=>model,state:{},document:{addEventListener(){}},svg:()=>'',escapeHtml:x=>String(x).replaceAll('<','&lt;'),console});
+vm.runInContext(fs.readFileSync('assets/settings_window/ssh.js','utf8'),context);
+let html=vm.runInContext("renderSshModal({type:'ssh-local'})",context);
+assert.match(html,/升级 SSH 接入/);
+assert.match(html,/重启 SSH 服务并中断已有连接/);
+assert.match(html,/data-ssh="setup"/);
+model.ssh.server.loopbackOnly=true;
+model.ssh.server.networks=[{name:'unrelated',category:'Public'}];
+assert.equal(vm.runInContext('sshLocalConfigured(sshModel().server)',context),true);
+html=vm.runInContext("renderSshModal({type:'ssh-local'})",context);
+assert.match(html,/修复本机接入/);
+assert.doesNotMatch(html,/自动规则仅适用于专用网络/);
+model.language='en';
+assert.match(vm.runInContext("sshErrorText('Target SSH access needs attention')",context),/target/);
+assert.match(vm.runInContext("sshErrorText('无法连接对方电脑：timeout')",context),/cause is unconfirmed/);
+const diagnostics=JSON.parse(vm.runInContext('sshDiagnostics()',context));
+assert.equal(diagnostics.server.loopbackOnly,true);
+assert.equal('loginPasswords' in diagnostics,false);
+console.log('SSH access UI: migration, network independence, repair guidance and safe diagnostics passed');

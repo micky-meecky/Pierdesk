@@ -1,0 +1,20 @@
+[package]
+name = "visual-region-detector"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+autobins = false
+
+[features]
+default = ["pure-rust"]
+pure-rust = []
+file-io = ["image/bmp", "image/jpeg", "image/png"]
+opencv = ["dep:opencv"]
+
+[dependencies]
+image = { version = "0.25", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+opencv = { version = "0.100.1", optional = true, default-features = false, features = ["clang-runtime", "imgproc"] }
+
+[workspace]

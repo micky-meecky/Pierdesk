@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pierdesk · 传输中心</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f5f7fa;
+      --surface: #ffffff;
+      --surface-raised: #fbfcfe;
+      --border: #e2e7ef;
+      --border-strong: #d2d9e4;
+      --text: #172033;
+      --muted: #697386;
+      --subtle: #8993a4;
+      --blue: #1769e8;
+      --blue-hover: #0d5fdc;
+      --blue-soft: #eaf2ff;
+      --green: #16845b;
+      --green-soft: #e8f7f0;
+      --amber: #a76005;
+      --amber-soft: #fff3dc;
+      --red: #cf3f4e;
+      --red-soft: #fff0f1;
+      --shadow: 0 14px 38px rgba(22, 40, 72, .08);
+      --tabs-bg: rgba(255,255,255,.72);
+      --control-hover: #f2f5f9;
+      --button-hover: #f7f9fc;
+      --table-head: #fafbfd;
+      --row-border: #edf0f4;
+      --row-hover: #f8faff;
+      --track: #e7ebf1;
+      --number-text: #4e596b;
+      --direction-text: #49566b;
+      --path-text: #37445a;
+      --file-glyph: #7d8797;
+      --scroll-track: #eef1f5;
+      --scroll-thumb: #9aa4b3;
+      --history-row-height: 76px;
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --canvas: #10141c;
+      --surface: #191f2a;
+      --surface-raised: #202733;
+      --border: #2d3645;
+      --border-strong: #3a4658;
+      --text: #edf2fa;
+      --muted: #aab4c5;
+      --subtle: #7f8ba0;
+      --blue: #68a4ff;
+      --blue-hover: #5598fb;
+      --blue-soft: #172c49;
+      --green: #58d5ad;
+      --green-soft: #17362f;
+      --amber: #f1b65d;
+      --amber-soft: #3d2c16;
+      --red: #ff8792;
+      --red-soft: #422229;
+      --shadow: 0 14px 38px rgba(0, 0, 0, .28);
+      --tabs-bg: rgba(25,31,42,.82);
+      --control-hover: #28313f;
+      --button-hover: #242d3a;
+      --table-head: #202733;
+      --row-border: #2a3341;
+      --row-hover: #202938;
+      --track: #313a48;
+      --number-text: #c1cad8;
+      --direction-text: #c8d0dd;
+      --path-text: #d6deea;
+      --file-glyph: #98a4b7;
+      --scroll-track: #151a23;
+      --scroll-thumb: #526074;
+    }
+
+    * { box-sizing: border-box; scrollbar-color: var(--scroll-thumb) var(--scroll-track); }
+    *::-webkit-scrollbar { width: 14px; height: 14px; }
+    *::-webkit-scrollbar-track { background: var(--scroll-track); }
+    *::-webkit-scrollbar-thumb { min-height: 30px; border: 3px solid var(--scroll-track); border-radius: 10px; background: var(--scroll-thumb); }
+    *::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--scroll-thumb) 78%, var(--text)); }
+    html, body { width: 100%; min-width: 0; height: 100%; margin: 0; overflow: hidden; background: var(--canvas); color: var(--text); }
+    body { font-size: 14px; line-height: 1.45; }
+    button { font: inherit; }
+    button:focus-visible, [tabindex]:focus-visible { outline: 2px solid rgba(23, 105, 232, .68); outline-offset: 2px; }
+
+    .app-shell { width: 100%; height: 100%; min-width: 0; margin: 0; padding: 24px 28px 22px; }
+    .app-shell.list-mode { display: flex; flex-direction: column; overflow: hidden; }
+    .app-shell.detail-mode { overflow: auto; }
+    .topbar { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; flex: 0 0 auto; }
+    .topbar > div, .detail-title-row > div { min-width: 0; }
+    .eyebrow { color: var(--blue); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 3px 0 4px; font-size: 29px; line-height: 1.2; letter-spacing: -.025em; font-weight: 700; }
+    .subtitle { color: var(--muted); font-size: 14px; }
+
+    .tabs { flex: 0 0 auto; display: inline-flex; padding: 4px; gap: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--tabs-bg); box-shadow: 0 3px 12px rgba(24, 42, 70, .04); }
+    .tab { display: inline-flex; align-items: center; gap: 8px; min-width: 118px; justify-content: center; padding: 9px 15px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 600; }
+    .tab:hover { color: var(--text); background: var(--control-hover); }
+    .tab.active { color: var(--blue); background: var(--surface); box-shadow: 0 1px 5px rgba(24, 42, 70, .12); }
+    .count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; display: inline-grid; place-items: center; background: var(--control-hover); color: var(--muted); font-size: 11px; }
+    .tab.active .count { background: var(--blue-soft); color: var(--blue); }
+
+    .panel { width: 100%; min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); box-shadow: var(--shadow); }
+    .list-mode .panel { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; }
+    .panel-toolbar { min-height: 58px; padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; background: var(--surface-raised); }
+    .panel-toolbar > div:first-child { min-width: 0; }
+    .panel-title { font-weight: 650; }
+    .panel-note { color: var(--muted); font-size: 13px; margin-left: 8px; }
+    .toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+
+    .btn { min-height: 34px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); display: inline-flex; gap: 7px; align-items: center; justify-content: center; cursor: pointer; font-weight: 600; }
+    .btn:hover:not(:disabled) { border-color: var(--border-strong); background: var(--button-hover); }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn.primary { color: white; border-color: var(--blue); background: var(--blue); }
+    .btn.primary:hover:not(:disabled) { background: var(--blue-hover); }
+    .btn.danger { color: var(--red); }
+    .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+    .btn.icon-only { width: 34px; padding: 0; }
+    .btn:disabled { opacity: .42; cursor: default; }
+    svg.icon { width: 17px; height: 17px; flex: 0 0 auto; stroke-width: 1.9; }
+
+    .table-scroll { width: 100%; min-width: 0; min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+    table { width: max(100%, var(--table-width, 1060px)); border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+    th { position: sticky; top: 0; z-index: 2; padding: 0; border-bottom: 1px solid var(--border); background: var(--table-head); color: var(--muted); text-align: left; font-size: 12px; font-weight: 650; }
+    .sort-button { width: 100%; height: 42px; padding: 0 13px; border: 0; background: transparent; color: inherit; display: flex; align-items: center; gap: 6px; cursor: pointer; text-align: left; white-space: nowrap; }
+    .sort-button:hover { color: var(--text); background: var(--control-hover); }
+    .sort-indicator { opacity: .28; width: 12px; font-size: 10px; }
+    .sort-button.active { color: var(--blue); }
+    .sort-button.active .sort-indicator { opacity: 1; }
+    .column-resizer { position: absolute; top: 7px; right: 0; z-index: 4; width: 8px; height: 28px; cursor: col-resize; touch-action: none; }
+    .column-resizer::after { content: ""; position: absolute; left: 3px; top: 3px; width: 1px; height: 22px; background: transparent; transition: background-color 120ms ease; }
+    th:hover .column-resizer::after, .column-resizer:hover::after, .column-resizer:focus-visible::after, .column-resizer.dragging::after { background: var(--blue); }
+    .column-resizer:focus-visible { outline-offset: -2px; }
+    td { height: 66px; padding: 9px 13px; border-bottom: 1px solid var(--row-border); vertical-align: middle; }
+    .history-table td { height: var(--history-row-height); }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr { background: var(--surface); transition: background-color 120ms ease; }
+    tbody tr:hover { background: var(--row-hover); }
+    .name-cell { display: flex; align-items: center; min-width: 0; gap: 11px; }
+    .file-icon { width: 36px; height: 36px; object-fit: contain; flex: 0 0 auto; }
+    .file-icon.fallback { display: grid; place-items: center; border-radius: 7px; color: var(--blue); background: var(--blue-soft); }
+    .name-stack { min-width: 0; }
+    .name-primary { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 650; }
+    .name-secondary { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--subtle); font-size: 12px; margin-top: 3px; }
+    .mono-number { color: var(--number-text); font-variant-numeric: tabular-nums; }
+    .status { display: inline-flex; align-items: center; gap: 6px; width: max-content; padding: 4px 8px; border-radius: 99px; font-size: 12px; font-weight: 650; }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .status.running, .status.awaiting { color: var(--blue); background: var(--blue-soft); }
+    .status.completed { color: var(--green); background: var(--green-soft); }
+    .status.paused { color: var(--amber); background: var(--amber-soft); }
+    .status.cancelled, .status.failed { color: var(--red); background: var(--red-soft); }
+    .progress { width: 100%; max-width: 150px; height: 5px; margin-top: 7px; overflow: hidden; border-radius: 99px; background: var(--track); }
+    .progress > i { display: block; height: 100%; border-radius: inherit; background: var(--blue); transition: width 200ms linear; }
+    .direction { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: var(--direction-text); }
+    .direction b { width: 23px; height: 23px; border-radius: 50%; display: grid; place-items: center; color: var(--blue); background: var(--blue-soft); }
+    .direction-copy { min-width: 0; overflow: hidden; display: flex; flex-direction: column; line-height: 1.25; }
+    .direction-label { color: var(--text); font-size: 13px; font-weight: 650; }
+    .direction.sending b { color: var(--amber); background: var(--amber-soft); }
+    .direction.sending .direction-label { color: var(--amber); }
+    .direction.receiving .direction-label { color: var(--blue); }
+    .history-limit { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+    .history-limit input { width: 70px; padding: 7px; border: 1px solid var(--border-strong); border-radius: 6px; font: inherit; color: var(--text); background: var(--surface); }
+    .direction-detail { overflow: hidden; color: var(--subtle); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .row-actions { display: flex; justify-content: flex-end; gap: 5px; }
+    .row-density { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+    .row-density .btn { min-height: 30px; width: 30px; padding: 0; }
+    .row-density-value { min-width: 40px; color: var(--text); text-align: center; font-variant-numeric: tabular-nums; }
+
+    .empty { min-height: 0; padding: 38px 24px; flex: 1 1 auto; display: grid; place-items: center; text-align: center; }
+    .empty-card { max-width: 410px; }
+    .empty-icon { width: 58px; height: 58px; margin: 0 auto 16px; border-radius: 16px; background: var(--blue-soft); color: var(--blue); display: grid; place-items: center; }
+    .empty-icon svg { width: 27px; height: 27px; }
+    .empty-title { font-size: 17px; font-weight: 650; margin-bottom: 7px; }
+    .empty-copy { color: var(--muted); }
+
+    .detail-head { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    .detail-title-row { min-width: 0; display: flex; align-items: center; gap: 11px; }
+    .detail-head h1 { margin: 0; font-size: 25px; }
+    .detail-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(300px, .7fr); gap: 16px; margin-bottom: 16px; }
+    .summary-card, .path-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 8px 22px rgba(22,40,72,.055); }
+    .summary-card { min-width: 0; padding: 18px; display: flex; align-items: center; gap: 16px; }
+    .summary-card .file-icon { width: 52px; height: 52px; }
+    .summary-name { font-size: 17px; font-weight: 680; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .summary-meta { margin-top: 5px; color: var(--muted); }
+    .facts { margin-left: auto; display: grid; grid-template-columns: repeat(2, minmax(94px, auto)); gap: 12px 20px; }
+    .fact-label { color: var(--subtle); font-size: 11px; }
+    .fact-value { margin-top: 2px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .path-card { padding: 15px 16px; }
+    .path-title { font-size: 13px; font-weight: 650; margin-bottom: 9px; }
+    .path-row { display: grid; grid-template-columns: 88px minmax(0,1fr) auto; align-items: center; gap: 9px; min-height: 40px; }
+    .path-row + .path-row { border-top: 1px solid var(--row-border); }
+    .path-label { color: var(--muted); white-space: nowrap; }
+    .path-viewport { overflow: hidden; white-space: nowrap; min-width: 0; }
+    .path-text { display: inline-block; padding-right: 60px; color: var(--path-text); }
+    .path-text.marquee { animation: path-scroll var(--marquee-time, 12s) linear infinite alternate; }
+    .path-text.marquee:hover { animation-play-state: paused; }
+    @keyframes path-scroll { from { transform: translateX(0); } to { transform: translateX(var(--marquee-distance)); } }
+    .path-actions { display: flex; gap: 3px; }
+
+    .files-panel { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 8px 22px rgba(22,40,72,.055); overflow: hidden; }
+    .files-toolbar { min-height: 52px; padding: 10px 14px 10px 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); background: var(--surface-raised); }
+    .file-list { max-height: calc(100vh - 365px); min-height: 230px; overflow: auto; scrollbar-gutter: stable; }
+    .file-row { min-height: 45px; padding: 7px 15px; display: grid; grid-template-columns: minmax(320px, 1fr) 120px 155px; align-items: center; gap: 12px; border-bottom: 1px solid var(--row-border); }
+    .file-row:last-child { border-bottom: 0; }
+    .file-name { min-width: 0; display: flex; align-items: center; gap: 9px; padding-left: calc(var(--depth, 0) * 17px); }
+    .file-name input { width: 16px; height: 16px; accent-color: var(--blue); }
+    .file-glyph { color: var(--file-glyph); display: grid; place-items: center; }
+    .file-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-status { display: grid; grid-template-columns: auto minmax(0, 76px); align-items: center; gap: 4px 9px; }
+    .file-speed { grid-column: 1 / -1; font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .file-status .progress { max-width: 76px; margin: 0; }
+    .footer-note { margin-top: 13px; color: var(--subtle); font-size: 12px; }
+
+    .toast { position: fixed; left: 50%; bottom: 22px; z-index: 20; transform: translate(-50%, 16px); padding: 9px 14px; border-radius: 8px; color: white; background: rgba(23,32,51,.94); opacity: 0; pointer-events: none; transition: opacity 150ms ease, transform 150ms ease; box-shadow: 0 8px 26px rgba(0,0,0,.18); }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 980px) {
+      .app-shell { padding: 20px 20px 18px; }
+      .topbar { align-items: stretch; flex-direction: column; gap: 14px; }
+      .tabs { align-self: flex-start; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .facts { grid-template-columns: repeat(4, auto); }
+      .detail-head { align-items: flex-start; flex-direction: column; }
+    }
+    @media (max-width: 780px) {
+      .app-shell { padding: 16px; }
+      h1 { font-size: 25px; }
+      .topbar { margin-bottom: 14px; }
+      .tabs { width: 100%; }
+      .tab { min-width: 0; flex: 1 1 0; padding-inline: 10px; }
+      .panel-toolbar { align-items: flex-start; }
+      .panel-note { display: block; margin: 3px 0 0; }
+      .toolbar-actions { width: 100%; justify-content: stretch; }
+      .toolbar-actions .btn { flex: 1 1 0; }
+      .facts { width: 100%; margin: 12px 0 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .summary-card { align-items: flex-start; flex-wrap: wrap; }
+      .file-row { min-width: 720px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+      .path-text.marquee { transform: none !important; text-overflow: ellipsis; max-width: 100%; overflow: hidden; }
+    }
+  </style>
+</head>
+<body>
+  <main id="app" class="app-shell" aria-live="polite"></main>
+  <div id="toast" class="toast" role="status"></div>
+  <script>
+    'use strict';
+
+    const host = window.chrome?.webview;
+    const state = {
+      model: { peerLabel: '', current: [], history: [], nowUnixMs: Date.now() },
+      language: 'zh-CN',
+      theme: 'light',
+      view: 'current',
+      detailKey: null,
+      detailOrigin: 'current',
+      detailStartedAt: 0,
+      selectedFiles: new Set(),
+      sort: {
+        current: { key: 'started', direction: 'desc' },
+        history: { key: 'completed', direction: 'desc' }
+      },
+      iconCache: new Map(),
+      historyRowHeight: 76,
+      historyColumnWidths: {
+        name: 420, size: 112, status: 132, direction: 190,
+        completed: 180, duration: 104, action: 126
+      },
+      columnResize: null,
+      pointerInteraction: false,
+      scrollInteraction: false,
+      scrollIdleTimer: 0,
+      renderDeferredByInteraction: false,
+      renderFlushTimer: 0
+    };
+
+    const clampHistoryRowHeight = value => Math.min(96, Math.max(64, Number(value) || 76));
+    const historyColumnLimits = {
+      name: [220, 800], size: [88, 240], status: [100, 240], direction: [130, 420],
+      completed: [150, 320], duration: [84, 220], action: [100, 220]
+    };
+    const clampHistoryColumn = (key, value) => {
+      const [minimum, maximum] = historyColumnLimits[key] || [80, 800];
+      return Math.min(maximum, Math.max(minimum, Math.round(Number(value) || minimum)));
+    };
+    const normalizeHistoryColumnWidths = value => Object.fromEntries(
+      Object.keys(historyColumnLimits).map(key => [key, clampHistoryColumn(key, value?.[key] ?? state.historyColumnWidths[key])])
+    );
+    const historyTableWidth = () => Object.values(state.historyColumnWidths).reduce((total, width) => total + width, 0);
+    document.documentElement.style.setProperty('--history-row-height', `${state.historyRowHeight}px`);
+
+    const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+    })[char]);
+
+    const englishExact = new Map([
+      ['传输记录', 'Transfer History'], ['传输中心', 'Transfer Center'],
+      ['已配对设备', 'Paired device'], ['当前没有任务', 'No current tasks'],
+      ['当前任务', 'Current tasks'], ['历史记录', 'History'], ['传输视图', 'Transfer views'],
+      ['查看详情', 'View details'], ['继续', 'Resume'], ['暂停', 'Pause'], ['取消', 'Cancel'],
+      ['名称', 'Name'], ['大小', 'Size'], ['状态', 'Status'], ['进度', 'Progress'],
+      ['方向', 'Direction'], ['完成时间', 'Completed'], ['开始时间', 'Started'],
+      ['用时', 'Duration'], ['速度', 'Speed'], ['实时速度', 'Current speed'], ['操作', 'Actions'],
+      ['发送', 'Sending'], ['接收', 'Receiving'], ['本机', 'This PC'],
+      ['等待粘贴', 'Awaiting paste'], ['传输中', 'Transferring'], ['已暂停', 'Paused'],
+      ['已取消', 'Cancelled'], ['已完成', 'Completed'], ['失败', 'Failed'],
+      ['还没有传输记录', 'No transfer history yet'], ['当前没有传输任务', 'No current transfers'],
+      ['任务列表', 'Task list'], ['历史任务', 'Historical tasks'],
+      ['点击任意列名切换排序方式和顺序', 'Select any column heading to change the sort'],
+      ['保留', 'Keep'], ['条', 'items'], ['保存', 'Save'], ['行高', 'Row height'],
+      ['全部暂停', 'Pause all'], ['全部继续', 'Resume all'], ['全部取消', 'Cancel all'],
+      ['路径暂不可用', 'Path is not available'],
+      ['Windows 未返回目标绝对路径', 'Windows did not return an absolute destination path'],
+      ['任务详情', 'Task details'],
+      ['总大小', 'Total size'], ['传输进度', 'Progress'], ['传输路径', 'Transfer paths'],
+      ['源位置', 'Source'], ['目标位置', 'Destination'], ['文件清单', 'File list'],
+      ['取消选中项', 'Cancel selected'], ['旧版本记录没有文件清单', 'No file list in this legacy record'],
+      ['源位置、目标位置和任务摘要仍然保留。', 'The source, destination, and task summary are still available.'],
+      ['关闭此窗口不会暂停或取消传输；任务状态由 Pierdesk 后台持续维护。', 'Closing this window does not pause or cancel transfers; Pierdesk keeps them running in the background.'],
+      ['路径已复制', 'Path copied'], ['返回任务列表', 'Back to task list'],
+      ['历史记录行高', 'History row height'], ['减小行高', 'Decrease row height'],
+      ['增大行高', 'Increase row height'], ['历史记录保存条数', 'History retention count']
+    ]);
+
+    function englishText(value) {
+      const source = String(value ?? '');
+      const leading = source.match(/^\s*/)?.[0] || '';
+      const trailing = source.match(/\s*$/)?.[0] || '';
+      const core = source.trim();
+      if (!core) return source;
+      let translated = englishExact.get(core) || core;
+      translated = translated
+        .replace(/^最近 (\d+) 条已结束任务，最多保留 (\d+) 条$/, 'Latest $1 finished tasks · keeping up to $2')
+        .replace(/^(\d+) 个任务$/, (_, count) => `${count} task${count === '1' ? '' : 's'}`)
+        .replace(/^(\d+) 个文件$/, (_, count) => `${count} file${count === '1' ? '' : 's'}`)
+        .replace(/^(\d+) 个文件夹$/, (_, count) => `${count} folder${count === '1' ? '' : 's'}`)
+        .replace(/(\d+) 项/g, (_, count) => `${count} item${count === '1' ? '' : 's'}`)
+        .replace(/^来自 (.+?) · (\d+) 个任务 · (\d+) 个未结束$/, 'From $1 · $2 tasks · $3 active')
+        .replace(/^最近 (\d+) 条已结束任务（最多保留 (\d+) 条）$/, 'Latest $1 finished tasks (keeping up to $2)')
+        .replace(/^完成、取消或失败的任务会出现在这里，最多保留 (\d+) 条。$/, 'Completed, cancelled, and failed tasks appear here; up to $1 are retained.')
+        .replace(/^窗口保持可用；收到任务后可以随时从托盘重新打开查看。$/, 'This window remains available and can be reopened from the tray when a transfer arrives.')
+        .replace(/^减少条数会移除最早的历史记录，不影响文件或当前传输$/, 'Reducing this limit removes the oldest history entries without affecting files or active transfers')
+        .replace(/^路径未由旧版本提供（来自 (.+)）$/, 'Path not provided by the legacy version (from $1)')
+        .replace(/^调整(.+)列宽$/, (_, label) => `Resize the ${englishExact.get(label) || label} column`)
+        .replace(/^按(.+?)(降序|升序)排列$/, (_, label, direction) => `Sort by ${englishExact.get(label) || label} ${direction === '降序' ? 'descending' : 'ascending'}`)
+        .replace(/^查看 (.+) 的详情$/, 'View details for $1')
+        .replace(/^取消 (.+)$/, 'Cancel $1')
+        .replace(/^继续 (.+)$/, 'Resume $1')
+        .replace(/^暂停 (.+)$/, 'Pause $1')
+        .replace(/^在资源管理器中打开(.+)$/, (_, label) => `Open ${englishExact.get(label) || label} in File Explorer`)
+        .replace(/^打开(.+)$/, (_, label) => `Open ${englishExact.get(label) || label}`)
+        .replace(/^复制(.+)$/, (_, label) => `Copy ${englishExact.get(label) || label}`)
+        .replace(/^选择 (.+)$/, 'Select $1')
+        .replace(/本机/g, 'This PC')
+        .replace(/(\d+) 个任务/g, (_, count) => `${count} task${count === '1' ? '' : 's'}`)
+        .replace(/ 个文件夹/g, ' folders')
+        .replace(/ 个文件/g, ' files')
+        .replace(/ · 历史记录保留完整清单/g, ' · full list retained in history')
+        .replace(/ · 选择文件夹会包含其未完成子项/g, ' · selecting a folder includes unfinished children');
+      return `${leading}${translated}${trailing}`;
+    }
+
+    function localizeRenderedTree(root) {
+      const english = state.language === 'en';
+      document.documentElement.lang = english ? 'en' : 'zh-CN';
+      document.title = english ? 'Pierdesk · Transfer Center' : 'Pierdesk · 传输中心';
+      if (!english) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      nodes.forEach(node => { node.nodeValue = englishText(node.nodeValue); });
+      root.querySelectorAll('[title],[aria-label],[placeholder]').forEach(element => {
+        for (const attribute of ['title', 'aria-label', 'placeholder']) {
+          if (element.hasAttribute(attribute)) element.setAttribute(attribute, englishText(element.getAttribute(attribute)));
+        }
+      });
+    }
+
+    const svg = name => {
+      const paths = {
+        current: '<path d="M4 7.5h5l1.6-2h9.4v13H4z"/><path d="M4 9h16"/>',
+        history: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5l3.4 2"/>',
+        chevron: '<path d="m9 6 6 6-6 6"/>',
+        back: '<path d="m15 6-6 6 6 6"/>',
+        pause: '<path d="M9 7v10M15 7v10"/>',
+        play: '<path d="m9 7 8 5-8 5z"/>',
+        cancel: '<circle cx="12" cy="12" r="8.5"/><path d="m9 9 6 6m0-6-6 6"/>',
+        copy: '<rect x="8" y="8" width="10" height="11" rx="2"/><path d="M15 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/>',
+        folder: '<path d="M3.5 7h6l1.8 2h9.2v9.5h-17z"/><path d="M3.5 9V5.5h5L10 7"/>',
+        file: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/>',
+        empty: '<path d="M4 7.5h5l1.6-2h9.4v13H4z"/><path d="M8 13h8"/>',
+        check: '<path d="m5 12 4 4 10-10"/>',
+        external: '<path d="M14 5h5v5M19 5l-8 8"/><path d="M17 13v6H5V7h6"/>'
+      };
+      return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
+    };
+
+    const send = payload => host?.postMessage(payload);
+    const taskByKey = (key, origin = state.view) => (state.model[origin] || []).find(task => task.key === key);
+
+    function iconData(task) {
+      const icon = task.icon;
+      if (!icon || !Array.isArray(icon.bgra) || !icon.bgra.length) return '';
+      if (state.iconCache.has(icon.key)) return state.iconCache.get(icon.key);
+      const canvas = document.createElement('canvas');
+      canvas.width = icon.width;
+      canvas.height = icon.height;
+      const context = canvas.getContext('2d');
+      const pixels = context.createImageData(icon.width, icon.height);
+      for (let source = 0, target = 0; source < icon.bgra.length; source += 4, target += 4) {
+        const alpha = icon.bgra[source + 3];
+        const straight = channel => alpha ? Math.min(255, Math.round(channel * 255 / alpha)) : 0;
+        pixels.data[target] = straight(icon.bgra[source + 2]);
+        pixels.data[target + 1] = straight(icon.bgra[source + 1]);
+        pixels.data[target + 2] = straight(icon.bgra[source]);
+        pixels.data[target + 3] = alpha;
+      }
+      context.putImageData(pixels, 0, 0);
+      const data = canvas.toDataURL('image/png');
+      state.iconCache.set(icon.key, data);
+      return data;
+    }
+
+    function taskIcon(task, extraClass = '') {
+      const data = iconData(task);
+      if (data) return `<img class="file-icon ${extraClass}" src="${data}" alt="">`;
+      return `<span class="file-icon fallback ${extraClass}">${svg(task.firstIsDirectory ? 'folder' : 'file')}</span>`;
+    }
+
+    const statusClass = value => ({
+      AwaitingPaste: 'awaiting', Running: 'running', Paused: 'paused',
+      Completed: 'completed', Cancelled: 'cancelled', Failed: 'failed'
+    })[value] || 'awaiting';
+
+    function compareTasks(a, b, key) {
+      const text = (left, right) => String(left ?? '').localeCompare(String(right ?? ''), state.language === 'en' ? 'en' : 'zh-CN', { numeric: true, sensitivity: 'base' });
+      const number = (left, right) => Number(left || 0) - Number(right || 0);
+      switch (key) {
+        case 'name': return text(a.name, b.name);
+        case 'size': return number(a.totalSize, b.totalSize);
+        case 'status': return number(a.stateRank, b.stateRank) || number(a.progress, b.progress);
+        case 'direction': return text(a.directionLabel, b.directionLabel) || text(a.directionDetail, b.directionDetail);
+        case 'speed': return number(a.bytesPerSecond, b.bytesPerSecond);
+        case 'started': return number(a.startedUnixMs, b.startedUnixMs);
+        case 'completed': return number(a.completedUnixMs, b.completedUnixMs);
+        case 'duration': return number(a.durationMs, b.durationMs);
+        case 'action': return number(a.actionRank, b.actionRank);
+        default: return 0;
+      }
+    }
+
+    function sortedTasks(view) {
+      const sorting = state.sort[view];
+      return [...(state.model[view] || [])].sort((a, b) => {
+        const primary = compareTasks(a, b, sorting.key);
+        const stable = primary || compareTasks(a, b, 'name') || String(a.key).localeCompare(String(b.key));
+        return sorting.direction === 'asc' ? stable : -stable;
+      });
+    }
+
+    function sortHeader(label, key, column = '', resizable = false) {
+      const active = state.sort[state.view].key === key;
+      const direction = state.sort[state.view].direction;
+      const handle = resizable ? `<span class="column-resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整${escapeHtml(label)}列宽" data-resize-column="${column}"></span>` : '';
+      return `<th${column ? ` data-column="${column}"` : ''}><button class="sort-button ${active ? 'active' : ''}" data-sort="${key}" aria-label="按${escapeHtml(label)}${active && direction === 'asc' ? '降序' : '升序'}排列"><span>${escapeHtml(label)}</span><span class="sort-indicator">${active ? (direction === 'asc' ? '▲' : '▼') : '◆'}</span></button>${handle}</th>`;
+    }
+
+    function tableDefinition(history) {
+      const columns = history ? [
+        ['名称', 'name', 'name'], ['大小', 'size', 'size'], ['状态', 'status', 'status'],
+        ['方向', 'direction', 'direction'], ['完成时间', 'completed', 'completed'],
+        ['用时', 'duration', 'duration'], ['操作', 'action', 'action']
+      ] : [
+        ['名称', 'name', 390], ['大小', 'size', 112], ['进度', 'status', 148],
+        ['方向', 'direction', 170], ['实时速度', 'speed', 140], ['开始时间', 'started', 172],
+        ['操作', 'action', 142]
+      ];
+      const widths = history
+        ? columns.map(([, , column]) => state.historyColumnWidths[column])
+        : columns.map(([, , width]) => width);
+      return {
+        width: widths.reduce((total, width) => total + width, 0),
+        colgroup: `<colgroup>${columns.map(([, , column], index) => `<col${history ? ` data-column="${column}"` : ''} style="width:${widths[index]}px">`).join('')}</colgroup>`,
+        headers: columns.map(([label, key, column]) => sortHeader(label, key, history ? column : '', history)).join('')
+      };
+    }
+
+    function header() {
+      return `<header class="topbar">
+        <div><div class="eyebrow">Pierdesk Transfer</div><h1>${state.view === 'history' ? '传输记录' : '传输中心'}</h1><div class="subtitle">${state.view === 'history' ? `最近 ${state.model.history.length} 条已结束任务，最多保留 ${state.model.historyLimit || 20} 条` : `${escapeHtml(state.model.peerLabel || '已配对设备')} · ${state.model.current.length ? `${state.model.current.length} 个任务` : '当前没有任务'}`}</div></div>
+        <nav class="tabs" aria-label="传输视图">
+          <button class="tab ${state.view === 'current' ? 'active' : ''}" data-view="current">${svg('current')}当前任务<span class="count">${state.model.current.length}</span></button>
+          <button class="tab ${state.view === 'history' ? 'active' : ''}" data-view="history">${svg('history')}历史记录<span class="count">${state.model.history.length}</span></button>
+        </nav>
+      </header>`;
+    }
+
+    function actionButtons(task, history) {
+      if (history) return `<button class="btn" data-detail="${task.key}">查看详情${svg('chevron')}</button>`;
+      const terminal = ['Completed', 'Cancelled', 'Failed'].includes(task.state);
+      return `<div class="row-actions">
+        <button class="btn icon-only" title="${task.state === 'Paused' ? '继续' : '暂停'}" aria-label="${task.state === 'Paused' ? '继续' : '暂停'} ${escapeHtml(task.name)}" data-action="${task.state === 'Paused' ? 'resume' : 'pause'}" data-task="${task.key}" ${terminal ? 'disabled' : ''}>${svg(task.state === 'Paused' ? 'play' : 'pause')}</button>
+        <button class="btn icon-only danger" title="取消" aria-label="取消 ${escapeHtml(task.name)}" data-action="cancel" data-task="${task.key}" ${terminal ? 'disabled' : ''}>${svg('cancel')}</button>
+        <button class="btn icon-only" title="查看详情" aria-label="查看 ${escapeHtml(task.name)} 的详情" data-detail="${task.key}">${svg('chevron')}</button>
+      </div>`;
+    }
+
+    function taskRows(tasks, history) {
+      return tasks.map(task => `<tr data-open-detail="${task.key}">
+        <td><div class="name-cell">${taskIcon(task)}<div class="name-stack"><div class="name-primary" title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</div><div class="name-secondary">${task.filesCount} 个文件${task.directoriesCount ? ` · ${task.directoriesCount} 个文件夹` : ''}</div></div></div></td>
+        <td class="mono-number">${escapeHtml(task.totalSizeLabel)}</td>
+        <td><span class="status ${statusClass(task.state)}">${escapeHtml(task.stateLabel)}</span>${history ? '' : `<div class="progress" aria-label="${task.progressLabel}"><i style="width:${task.progress}%"></i></div>`}</td>
+        <td><span class="direction ${task.directionLabel === '发送' ? 'sending' : 'receiving'}"><b>${escapeHtml(task.directionArrow)}</b><span class="direction-copy"><span class="direction-label">${escapeHtml(task.directionLabel)}</span><span class="direction-detail" title="${escapeHtml(task.directionDetail)}">${escapeHtml(task.directionDetail)}</span></span></span></td>
+        ${history ? `<td class="mono-number optional-column">${escapeHtml(task.completedLabel)}</td><td class="mono-number optional-column">${escapeHtml(task.durationLabel)}</td>` : `<td class="mono-number optional-column">${escapeHtml(task.speedLabel)}</td><td class="mono-number optional-column">${escapeHtml(task.startedLabel)}</td>`}
+        <td>${actionButtons(task, history)}</td>
+      </tr>`).join('');
+    }
+
+    function listView() {
+      const history = state.view === 'history';
+      const tasks = sortedTasks(state.view);
+      const emptyTitle = history ? '还没有传输记录' : '当前没有传输任务';
+      const emptyCopy = history ? `完成、取消或失败的任务会出现在这里，最多保留 ${state.model.historyLimit || 20} 条。` : '窗口保持可用；收到任务后可以随时从托盘重新打开查看。';
+      const definition = tableDefinition(history);
+      const table = tasks.length ? `<div class="table-scroll"><table class="${history ? 'history-table' : ''}" style="--table-width:${definition.width}px">${definition.colgroup}<thead><tr>${definition.headers}</tr></thead><tbody>${taskRows(tasks, history)}</tbody></table></div>` : `<section class="empty"><div class="empty-card"><div class="empty-icon">${svg('empty')}</div><div class="empty-title">${emptyTitle}</div><div class="empty-copy">${emptyCopy}</div></div></section>`;
+      const active = state.model.current.filter(task => !['Completed', 'Cancelled', 'Failed'].includes(task.state));
+      const pausable = active.some(task => task.state !== 'Paused');
+      const resumable = active.some(task => task.state === 'Paused');
+      const density = `<div class="toolbar-actions"><label class="history-limit" title="减少条数会移除最早的历史记录，不影响文件或当前传输">保留<input id="history-limit" type="number" min="1" max="500" value="${state.model.historyLimit || 20}" aria-label="历史记录保存条数">条</label><button class="btn" data-save-history-limit>保存</button><div class="row-density" aria-label="历史记录行高"><span>行高</span><button class="btn" data-row-density="-4" title="减小行高">−</button><span class="row-density-value">${state.historyRowHeight}px</span><button class="btn" data-row-density="4" title="增大行高">＋</button></div></div>`;
+      return `${header()}<section class="panel"><div class="panel-toolbar"><div><span class="panel-title">${history ? '历史任务' : '任务列表'}</span><span class="panel-note">点击任意列名切换排序方式和顺序</span></div>${history ? density : `<div class="toolbar-actions"><button class="btn" data-action="pause-all" ${pausable ? '' : 'disabled'}>${svg('pause')}全部暂停</button><button class="btn" data-action="resume-all" ${resumable ? '' : 'disabled'}>${svg('play')}全部继续</button><button class="btn danger" data-action="cancel-all" ${active.length ? '' : 'disabled'}>${svg('cancel')}全部取消</button></div>`}</div>${table}</section>`;
+    }
+
+    function pathRow(label, path, kind, localPath) {
+      const open = localPath ? `<button class="btn icon-only ghost" data-open-path="${kind}" title="在资源管理器中打开${label}" aria-label="打开${label}">${svg('external')}</button>` : '';
+      return `<div class="path-row"><span class="path-label">${label}</span><span class="path-viewport"><span class="path-text" title="${escapeHtml(path)}">${escapeHtml(path || '路径暂不可用')}</span></span><span class="path-actions"><button class="btn icon-only ghost" data-copy-path="${kind}" title="复制${label}" aria-label="复制${label}">${svg('copy')}</button>${open}</span></div>`;
+    }
+
+    function fileDepth(name) { return Math.max(0, String(name).split(/[\\/]/).length - 1); }
+
+    function fileRows(task, history) {
+      return task.files.map(file => {
+        const checked = state.selectedFiles.has(file.key);
+        const terminal = ['Completed', 'Cancelled', 'Failed'].includes(file.state);
+        return `<div class="file-row"><div class="file-name" style="--depth:${fileDepth(file.name)}"><input type="checkbox" data-file="${file.key}" aria-label="选择 ${escapeHtml(file.name)}" ${checked ? 'checked' : ''} ${history || terminal || task.receiving === false ? 'disabled' : ''}><span class="file-glyph">${svg(file.isDirectory ? 'folder' : 'file')}</span><span class="file-label" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span></div><div class="mono-number">${file.isDirectory ? '—' : escapeHtml(file.sizeLabel)}</div><div class="file-status"><span class="status ${statusClass(file.state)}">${escapeHtml(file.stateLabel)}</span>${file.isDirectory ? '' : `<div class="progress"><i style="width:${file.progress}%"></i></div><span class="file-speed"><span>实时速度</span> <span>${escapeHtml(file.speedLabel)}</span></span>`}</div></div>`;
+      }).join('');
+    }
+
+    function detailView(task, history) {
+      const terminal = ['Completed', 'Cancelled', 'Failed'].includes(task.state);
+      return `<div class="detail-head"><div class="detail-title-row"><button class="btn icon-only" data-back aria-label="返回任务列表">${svg('back')}</button><div><div class="eyebrow">${history ? 'Transfer History' : 'Transfer Detail'}</div><h1>任务详情</h1></div><span class="status ${statusClass(task.state)}">${escapeHtml(task.stateLabel)}</span></div><nav class="tabs" aria-label="传输视图"><button class="tab ${state.detailOrigin === 'current' ? 'active' : ''}" data-view="current">${svg('current')}当前任务<span class="count">${state.model.current.length}</span></button><button class="tab ${state.detailOrigin === 'history' ? 'active' : ''}" data-view="history">${svg('history')}历史记录<span class="count">${state.model.history.length}</span></button></nav></div>
+      <section class="detail-grid"><article class="summary-card">${taskIcon(task)}<div class="name-stack"><div class="summary-name" title="${escapeHtml(task.name)}">${escapeHtml(task.name)}</div><div class="summary-meta">${task.filesCount} 个文件${task.directoriesCount ? ` · ${task.directoriesCount} 个文件夹` : ''} · ${escapeHtml(task.directionDetail)}</div></div><div class="facts"><div><div class="fact-label">总大小</div><div class="fact-value">${escapeHtml(task.totalSizeLabel)}</div></div><div><div class="fact-label">传输进度</div><div class="fact-value">${escapeHtml(task.progressLabel)}</div></div><div><div class="fact-label">${task.completedUnixMs ? '完成时间' : '开始时间'}</div><div class="fact-value">${escapeHtml(task.completedUnixMs ? task.completedLabel : task.startedLabel)}</div></div><div><div class="fact-label">用时</div><div class="fact-value">${escapeHtml(task.durationLabel)}</div></div><div><div class="fact-label">实时速度</div><div class="fact-value">${escapeHtml(task.speedLabel)}</div></div></div></article>
+      <article class="path-card"><div class="path-title">传输路径</div>${pathRow('源位置', task.sourceLocation, 'source', task.directionLabel === '发送')}${pathRow('目标位置', task.targetLocation, 'target', task.directionLabel === '接收')}</article></section>
+      <section class="files-panel"><div class="files-toolbar"><div><span class="panel-title">文件清单</span><span class="panel-note">${task.files.length} 项${history ? ' · 历史记录保留完整清单' : ' · 选择文件夹会包含其未完成子项'}</span></div>${history ? '' : `<button class="btn danger" data-cancel-files ${state.selectedFiles.size && !terminal && task.receiving !== false ? '' : 'disabled'}>${svg('cancel')}取消选中项</button>`}</div><div class="file-list">${task.files.length ? fileRows(task, history) : `<section class="empty"><div class="empty-card"><div class="empty-title">旧版本记录没有文件清单</div><div class="empty-copy">源位置、目标位置和任务摘要仍然保留。</div></div></section>`}</div></section>
+      <div class="footer-note">关闭此窗口不会暂停或取消传输；任务状态由 Pierdesk 后台持续维护。</div>`;
+    }
+
+    function setupMarquees() {
+      requestAnimationFrame(() => document.querySelectorAll('.path-viewport').forEach(viewport => {
+        const text = viewport.querySelector('.path-text');
+        const overflow = text.scrollWidth - viewport.clientWidth;
+        if (overflow > 8) {
+          text.style.setProperty('--marquee-distance', `${-overflow - 24}px`);
+          text.style.setProperty('--marquee-time', `${Math.max(8, overflow / 28)}s`);
+          text.style.animationDelay = `${-Math.max(0, performance.now() - state.detailStartedAt) / 1000}s`;
+          text.classList.add('marquee');
+        }
+      }));
+    }
+
+    function updateHistoryColumnInDom(key) {
+      const width = state.historyColumnWidths[key];
+      const column = document.querySelector(`.history-table col[data-column="${key}"]`);
+      const table = column?.closest('table');
+      if (column) column.style.width = `${width}px`;
+      if (table) table.style.setProperty('--table-width', `${historyTableWidth()}px`);
+    }
+
+    function commitHistoryColumnWidths() {
+      send({ action: 'set-column-widths', columnWidths: state.historyColumnWidths });
+    }
+
+    function applyTheme(theme) {
+      state.theme = theme === 'dark' ? 'dark' : 'light';
+      document.documentElement.dataset.theme = state.theme;
+      document.documentElement.style.colorScheme = state.theme;
+    }
+
+    function scheduleDeferredRender() {
+      clearTimeout(state.renderFlushTimer);
+      state.renderFlushTimer = setTimeout(() => {
+        if (!state.renderDeferredByInteraction || state.pointerInteraction || state.scrollInteraction || state.columnResize) return;
+        state.renderDeferredByInteraction = false;
+        render();
+      }, 0);
+    }
+
+    function requestModelRender() {
+      if (state.pointerInteraction || state.scrollInteraction || state.columnResize) {
+        state.renderDeferredByInteraction = true;
+        return;
+      }
+      render();
+    }
+
+    function render() {
+      state.renderDeferredByInteraction = false;
+      const app = document.getElementById('app');
+      const previousTableScroll = app.querySelector('.table-scroll')?.scrollTop || 0;
+      const previousTableScrollLeft = app.querySelector('.table-scroll')?.scrollLeft || 0;
+      const previousFileScroll = app.querySelector('.file-list')?.scrollTop || 0;
+      app.className = `app-shell ${state.detailKey ? 'detail-mode' : 'list-mode'}`;
+      if (state.detailKey) {
+        const task = taskByKey(state.detailKey, state.detailOrigin);
+        if (task) app.innerHTML = detailView(task, state.detailOrigin === 'history');
+        else { state.detailKey = null; app.innerHTML = listView(); }
+      } else app.innerHTML = listView();
+      const tableScroll = app.querySelector('.table-scroll');
+      const fileScroll = app.querySelector('.file-list');
+      if (tableScroll) {
+        tableScroll.scrollTop = previousTableScroll;
+        tableScroll.scrollLeft = previousTableScrollLeft;
+      }
+      if (fileScroll) fileScroll.scrollTop = previousFileScroll;
+      localizeRenderedTree(app);
+      setupMarquees();
+    }
+
+    function toast(message) {
+      const element = document.getElementById('toast');
+      element.textContent = message;
+      element.classList.add('show');
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => element.classList.remove('show'), 1500);
+    }
+
+    function toggleFile(task, file, checked) {
+      const prefix = `${file.name.replace(/[\\/]+$/, '')}\\`;
+      for (const candidate of task.files) {
+        const descendant = candidate.key === file.key || (file.isDirectory && candidate.name.startsWith(prefix));
+        if (descendant && !['Completed', 'Cancelled', 'Failed'].includes(candidate.state)) {
+          if (checked) state.selectedFiles.add(candidate.key); else state.selectedFiles.delete(candidate.key);
+        }
+      }
+    }
+
+    document.addEventListener('pointerdown', event => {
+      if (event.button === 0) {
+        state.pointerInteraction = true;
+        clearTimeout(state.renderFlushTimer);
+      }
+      const handle = event.target.closest('[data-resize-column]');
+      if (!handle || event.button !== 0) return;
+      const key = handle.dataset.resizeColumn;
+      event.preventDefault();
+      event.stopPropagation();
+      handle.setPointerCapture?.(event.pointerId);
+      handle.classList.add('dragging');
+      state.columnResize = { key, startX: event.clientX, startWidth: state.historyColumnWidths[key], handle };
+    });
+
+    document.addEventListener('pointermove', event => {
+      const resize = state.columnResize;
+      if (!resize) return;
+      event.preventDefault();
+      state.historyColumnWidths[resize.key] = clampHistoryColumn(resize.key, resize.startWidth + event.clientX - resize.startX);
+      updateHistoryColumnInDom(resize.key);
+    });
+
+    function finishColumnResize(event) {
+      const resize = state.columnResize;
+      if (!resize) return;
+      state.columnResize = null;
+      resize.handle.classList.remove('dragging');
+      if (Number.isInteger(event.pointerId) && resize.handle.hasPointerCapture?.(event.pointerId)) {
+        resize.handle.releasePointerCapture(event.pointerId);
+      }
+      commitHistoryColumnWidths();
+    }
+
+    function finishPointerInteraction(event) {
+      finishColumnResize(event);
+      state.pointerInteraction = false;
+      scheduleDeferredRender();
+    }
+
+    document.addEventListener('pointerup', finishPointerInteraction);
+    document.addEventListener('pointercancel', finishPointerInteraction);
+    document.addEventListener('lostpointercapture', event => {
+      if (state.columnResize?.handle === event.target) finishColumnResize(event);
+    });
+    window.addEventListener('blur', event => {
+      if (state.pointerInteraction || state.columnResize) finishPointerInteraction(event);
+    });
+
+    document.addEventListener('scroll', event => {
+      if (!event.target.matches?.('.table-scroll, .file-list, .detail-mode')) return;
+      state.scrollInteraction = true;
+      clearTimeout(state.scrollIdleTimer);
+      state.scrollIdleTimer = setTimeout(() => {
+        state.scrollInteraction = false;
+        scheduleDeferredRender();
+      }, 180);
+    }, true);
+
+    document.addEventListener('keydown', event => {
+      const handle = event.target.closest('[data-resize-column]');
+      if (!handle || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      event.preventDefault();
+      const key = handle.dataset.resizeColumn;
+      state.historyColumnWidths[key] = clampHistoryColumn(key, state.historyColumnWidths[key] + (event.key === 'ArrowRight' ? 8 : -8));
+      updateHistoryColumnInDom(key);
+      commitHistoryColumnWidths();
+    });
+
+    document.addEventListener('click', event => {
+      const target = event.target.closest('button, tr[data-open-detail]');
+      if (!target) return;
+      if (target.hasAttribute('data-save-history-limit')) {
+        const input = document.getElementById('history-limit');
+        if (!input.reportValidity()) return;
+        const limit = Number(input.value);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 500) return;
+        send({ action: 'set-history-limit', historyLimit: limit });
+        return;
+      }
+      if (target.dataset.view) {
+        state.view = target.dataset.view;
+        state.detailKey = null;
+        state.selectedFiles.clear();
+        render();
+        return;
+      }
+      if (target.dataset.sort) {
+        const sorting = state.sort[state.view];
+        if (sorting.key === target.dataset.sort) sorting.direction = sorting.direction === 'asc' ? 'desc' : 'asc';
+        else { sorting.key = target.dataset.sort; sorting.direction = ['name', 'status', 'direction'].includes(sorting.key) ? 'asc' : 'desc'; }
+        render();
+        return;
+      }
+      if (target.dataset.rowDensity) {
+        state.historyRowHeight = clampHistoryRowHeight(state.historyRowHeight + Number(target.dataset.rowDensity));
+        document.documentElement.style.setProperty('--history-row-height', `${state.historyRowHeight}px`);
+        send({ action: 'set-row-height', rowHeight: state.historyRowHeight });
+        render();
+        return;
+      }
+      if (target.dataset.detail || target.dataset.openDetail) {
+        state.detailKey = target.dataset.detail || target.dataset.openDetail;
+        state.detailOrigin = state.view;
+        state.detailStartedAt = performance.now();
+        state.selectedFiles.clear();
+        render();
+        return;
+      }
+      if (target.hasAttribute('data-back')) {
+        state.view = state.detailOrigin;
+        state.detailKey = null;
+        state.selectedFiles.clear();
+        render();
+        return;
+      }
+      if (target.dataset.action) {
+        send({ action: target.dataset.action, task: target.dataset.task || null });
+        return;
+      }
+      if (target.dataset.copyPath) {
+        const task = taskByKey(state.detailKey, state.detailOrigin);
+        const path = target.dataset.copyPath === 'source' ? task?.sourceLocation : task?.targetLocation;
+        if (path) { send({ action: 'copy-path', path }); toast('路径已复制'); }
+        return;
+      }
+      if (target.dataset.openPath) {
+        const task = taskByKey(state.detailKey, state.detailOrigin);
+        const path = target.dataset.openPath === 'source' ? task?.sourceLocation : task?.targetLocation;
+        if (path) send({ action: 'open-path', path });
+        return;
+      }
+      if (target.hasAttribute('data-cancel-files')) {
+        if (state.detailKey && state.selectedFiles.size) send({ action: 'cancel-files', task: state.detailKey, files: [...state.selectedFiles] });
+      }
+    });
+
+    document.addEventListener('change', event => {
+      const input = event.target.closest('input[data-file]');
+      if (!input) return;
+      const task = taskByKey(state.detailKey, state.detailOrigin);
+      const file = task?.files.find(item => item.key === input.dataset.file);
+      if (task && file) { toggleFile(task, file, input.checked); render(); }
+    });
+
+    host?.addEventListener('message', event => {
+      if (!event.data) return;
+      if (event.data.type === 'language') {
+        const language = event.data.language === 'en' ? 'en' : 'zh-CN';
+        if (state.language === language) return;
+        state.language = language;
+        requestModelRender();
+        return;
+      }
+      if (event.data.type === 'theme') {
+        applyTheme(event.data.theme);
+        return;
+      }
+      if (event.data.type === 'view') {
+        state.view = event.data.view === 'history' ? 'history' : 'current';
+        state.detailKey = null;
+        state.selectedFiles.clear();
+        render();
+        return;
+      }
+      if (event.data.type !== 'model') return;
+      state.language = event.data.language === 'en' ? 'en' : 'zh-CN';
+      applyTheme(event.data.theme);
+      const origin = state.detailKey ? state.detailOrigin : state.view;
+      const before = JSON.stringify({ peer: state.model.peerLabel, tasks: state.model[origin], currentCount: state.model.current.length, historyCount: state.model.history.length });
+      const rowHeight = clampHistoryRowHeight(event.data.historyRowHeight);
+      const historyLimitChanged = state.model.historyLimit !== event.data.historyLimit;
+      const rowHeightChanged = state.historyRowHeight !== rowHeight;
+      const columnWidths = state.columnResize
+        ? state.historyColumnWidths
+        : normalizeHistoryColumnWidths(event.data.historyColumnWidths);
+      const columnWidthsChanged = JSON.stringify(state.historyColumnWidths) !== JSON.stringify(columnWidths);
+      state.model = event.data;
+      state.historyRowHeight = rowHeight;
+      state.historyColumnWidths = columnWidths;
+      document.documentElement.style.setProperty('--history-row-height', `${state.historyRowHeight}px`);
+      let detailRemoved = false;
+      if (state.detailKey && !taskByKey(state.detailKey, state.detailOrigin)) { state.detailKey = null; detailRemoved = true; }
+      const nextOrigin = state.detailKey ? state.detailOrigin : state.view;
+      const after = JSON.stringify({ peer: state.model.peerLabel, tasks: state.model[nextOrigin], currentCount: state.model.current.length, historyCount: state.model.history.length });
+      if (detailRemoved || rowHeightChanged || columnWidthsChanged || historyLimitChanged || before !== after) {
+        requestModelRender();
+      }
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+      applyTheme(state.theme);
+      render();
+      send({ action: 'ready' });
+    });
+  </script>
+</body>
+</html>

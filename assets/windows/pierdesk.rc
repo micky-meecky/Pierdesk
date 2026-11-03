@@ -1,0 +1,45 @@
+#include <windows.h>
+#include "pierdesk-version.h"
+
+#define IDI_PIERDESK 1
+
+IDI_PIERDESK ICON "assets\\brand\\pierdesk.ico"
+
+1 24 "assets\\windows\\pierdesk.manifest"
+
+1 VERSIONINFO
+FILEVERSION PIERDESK_VERSION
+PRODUCTVERSION PIERDESK_VERSION
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS VS_FF_DEBUG
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", PIERDESK_AUTHOR_STRING
+            VALUE "FileDescription", PIERDESK_DESCRIPTION_STRING
+            VALUE "FileVersion", PIERDESK_VERSION_STRING
+            VALUE "InternalName", "pierdesk\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 " PIERDESK_AUTHOR_STRING
+            VALUE "OriginalFilename", "pierdesk.exe\0"
+            VALUE "ProductName", "Pierdesk\0"
+            VALUE "ProductVersion", PIERDESK_VERSION_STRING
+            VALUE "Author", PIERDESK_AUTHOR_STRING
+            VALUE "Purpose", "Two machines, one lightweight workspace.\0"
+            VALUE "FerryTicket", "CF-2PC-ONE-DESK\0"
+            VALUE "Comments", "Built for direct file clipboard transfer and cross-screen control without heavyweight remote-desktop software.\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

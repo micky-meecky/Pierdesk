@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+/dist/
+*.pdb
+
+# Local deployment settings and secrets
+.env
+.env.*
+/scripts/clipferry-deploy-targets.local.psd1
+signing-key.pk8
+*.sqlite*
+*.dpapi
+
+# Local editor and OS files
+/.vscode/
+/.idea/
+*.log
+Thumbs.db
+.DS_Store
