@@ -240,7 +240,7 @@ Thank you for using, sharing, or supporting Pierdesk.
 
 ## License
 
-Pierdesk is licensed under the [GNU General Public License v3.0](./LICENSE), identified by the SPDX expression `GPL-3.0-only`. You may use, study, modify, and redistribute it under the terms of GPLv3, including the corresponding-source and same-license requirements that apply when distributing the program or a derivative work.
+Pierdesk is licensed under the [GNU General Public License v3.0](./LICENSE), identified by the SPDX expression `GPL-3.0-only`. You may use, study, modify, and redistribute it under the terms of GPLv3, including the corresponding-source and same-license requirements that apply when distributing the program or a derivative work. Third-party components, including the bundled OpenSSH, keep their own licenses; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
 
 ---
 
