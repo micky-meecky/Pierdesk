@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version: 0.1.4" src="https://img.shields.io/badge/version-0.1.4-278AC4?style=flat-square">
+  <img alt="Latest release" src="https://img.shields.io/github/v/release/micky-meecky/Pierdesk?include_prereleases&amp;label=version&amp;style=flat-square&amp;color=278AC4">
   <img alt="Platform: Windows 10 and 11 x64" src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-080C42?style=flat-square">
   <img alt="Language: Rust" src="https://img.shields.io/badge/language-Rust-278AC4?style=flat-square">
   <img alt="License: GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-DCE5EF?style=flat-square&amp;labelColor=080C42">
@@ -43,7 +43,7 @@ There is no cloud upload, no custom file manager, and no new transfer workflow t
 ### Lightweight
 
 - One native Windows executable, with no bundled Electron, WebView, database, or separate runtime.
-- The 0.1.4 release build is about 2.8 MiB and can run directly from any folder.
+- The release build is about 14 MiB, including the OpenSSH components used by Remote work, and can run directly from any folder.
 - Bounded, streaming reads avoid loading an entire large file into memory before sending it.
 
 ### Convenient
@@ -119,7 +119,7 @@ To copy in the other direction, repeat the same steps with the computers reverse
 
 ### Tray menu reference
 
-The 0.1.4 tray menu is currently displayed in Chinese:
+The tray menu is currently displayed in Chinese:
 
 | Menu item | Purpose |
 | --- | --- |

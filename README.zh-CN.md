@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img alt="版本：0.1.4" src="https://img.shields.io/badge/version-0.1.4-278AC4?style=flat-square">
+  <img alt="最新版本" src="https://img.shields.io/github/v/release/micky-meecky/Pierdesk?include_prereleases&amp;label=version&amp;style=flat-square&amp;color=278AC4">
   <img alt="平台：Windows 10 和 11 x64" src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011%20x64-080C42?style=flat-square">
   <img alt="语言：Rust" src="https://img.shields.io/badge/language-Rust-278AC4?style=flat-square">
   <img alt="许可证：GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-DCE5EF?style=flat-square&amp;labelColor=080C42">
@@ -43,7 +43,7 @@ Pierdesk 只专注于把这件事做好：
 ### 轻量
 
 - 一个原生 Windows EXE，不捆绑 Electron、WebView、数据库或独立运行时。
-- 0.1.4 的 Release 构建约 2.8 MiB，可直接放在任意目录运行。
+- Release 构建约 14 MiB（含“远程工作”使用的 OpenSSH 组件），可直接放在任意目录运行。
 - 文件内容采用有界内存的流式传输，不会为了发送大文件先把整个文件读进内存。
 
 ### 便捷
