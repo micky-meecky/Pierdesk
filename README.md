@@ -125,20 +125,23 @@ To copy in the other direction, repeat the same steps with the computers reverse
 
 ### Tray menu reference
 
-The tray menu is currently displayed in Chinese:
+The tray menu follows the interface language in Settings → General (English by default; Simplified Chinese is also available):
 
 | Menu item | Purpose |
 | --- | --- |
-| 查看状态 | View the local identity, trusted peer, connection, latest manifest, and transfer state |
-| 配对新设备… | Discover and pair another Pierdesk computer |
-| 管理已配对设备… | List trusted computers or revoke a pairing |
-| 高级连接设置… | Manually select a peer and addresses for unusual network setups |
-| 接收待确认的文件剪贴板 | Accept a pending manifest when automatic receiving is disabled |
-| 显示传输窗口 | View file count, byte progress, speed, and current state |
-| 暂停 / 继续 / 取消传输 | Pause, resume, or cancel the active receiving transfer |
-| 随 Windows 启动 | Toggle startup for the current Windows user |
-| 打开诊断日志 | Open the diagnostic log for discovery, connection, or transfer issues |
-| 退出 Pierdesk | Stop Pierdesk cleanly |
+| View status | View the local identity, trusted peer, connection, latest manifest, and transfer state |
+| Pair new device… | Discover and pair another Pierdesk computer |
+| Manage paired devices… | List trusted computers or revoke a pairing |
+| Advanced connection settings… | Manually select a peer and addresses for unusual network setups |
+| Screenshot… | Capture and annotate a screenshot |
+| Shared clipboard | Turn the shared clipboard on or off |
+| Accept pending file clipboard | Accept a pending manifest when automatic receiving is disabled |
+| Show transfer center | View file count, byte progress, speed, and current state |
+| Pause / Resume / Cancel all receives | Pause, resume, or cancel the active receiving transfers |
+| Start with Windows | Toggle startup for the current Windows user |
+| Open diagnostic log | Open the diagnostic log for discovery, connection, or transfer issues |
+| About Pierdesk… | Version, author, and license |
+| Quit Pierdesk | Stop Pierdesk cleanly |
 
 ## How it works
 
