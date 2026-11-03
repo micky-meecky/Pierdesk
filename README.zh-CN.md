@@ -28,6 +28,12 @@
   <img alt="许可证：GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-DCE5EF?style=flat-square&amp;labelColor=080C42">
 </p>
 
+<p align="center">
+  <img src="./assets/screenshots/status-overview.png" width="900" alt="Pierdesk 状态总览：四台已配对的电脑同时连接，显示每条连接的实时延迟，以及最近的剪贴板、文件传输和跨屏活动">
+  <br>
+  <sub>状态总览（示例数据）：四台已配对的电脑，设备名和地址均为演示用。</sub>
+</p>
+
 ## 为什么是 Pierdesk
 
 同时使用两台电脑时，移动文件不应该变成一项额外工作。键盘和鼠标可以借助 Microsoft PowerToys 的 Mouse Without Borders 在机器之间移动，但它内置的文件复制只支持单个文件，并且有 100 MB 上限。文件夹、多文件和大文件仍然需要换一种传输方式。

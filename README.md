@@ -28,6 +28,12 @@
   <img alt="License: GPL-3.0-only" src="https://img.shields.io/badge/license-GPL--3.0--only-DCE5EF?style=flat-square&amp;labelColor=080C42">
 </p>
 
+<p align="center">
+  <img src="./assets/screenshots/status-overview.png" width="900" alt="Pierdesk status overview: four paired computers connected, with live latency for every link and recent clipboard, file-transfer and cross-screen activity">
+  <br>
+  <sub>The status overview, shown with sample data: four paired computers (demo names and addresses).</sub>
+</p>
+
 ## Why Pierdesk
 
 Using two computers should not make moving a file feel like a separate job. Keyboard and mouse movement can be handled by Microsoft PowerToys Mouse Without Borders, but its built-in file copy supports only one file at a time and has a 100 MB limit. Folders, multiple selections, and larger files still need another route.
