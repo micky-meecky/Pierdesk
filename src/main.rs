@@ -275,7 +275,12 @@ fn run() -> Result<(), String> {
         }
         "about" => {
             reject_remaining_arguments(&mut arguments, "about")?;
-            println!("{}", pierdesk::about::dialog_text());
+            let text = if wizard_english() {
+                pierdesk::about::dialog_text_english()
+            } else {
+                pierdesk::about::dialog_text()
+            };
+            println!("{text}");
             Ok(())
         }
         "ferry-ticket" => {
@@ -930,12 +935,30 @@ fn run_tray(detach_console: bool) -> ExitCode {
     }
 }
 
+/// Language of the console wizards: follows the interface language in Settings (English by default).
+fn wizard_english() -> bool {
+    static ENGLISH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENGLISH.get_or_init(|| {
+        DeviceStore::current_user()
+            .ok()
+            .and_then(|store| pierdesk::app_settings::UiPreferences::load_or_default(&store).ok())
+            .is_none_or(|preferences| preferences.language == pierdesk::app_settings::UiLanguage::English)
+    })
+}
+
+/// Chooses the Chinese or English text of a console message.
+macro_rules! tr {
+    ($zh:expr, $en:expr) => {
+        if wizard_english() { $en } else { $zh }
+    };
+}
+
 fn run_pair_wizard() -> Result<(), String> {
     let result = run_pair_wizard_inner();
     if let Err(error) = &result {
-        eprintln!("\n配对失败：{error}");
+        eprintln!("\n{}{error}", tr!("配对失败：", "Pairing failed: "));
     }
-    wait_for_enter("\n按 Enter 关闭此窗口...")?;
+    wait_for_enter(tr!("\n按 Enter 关闭此窗口...", "\nPress Enter to close this window..."))?;
     result
 }
 
@@ -945,35 +968,35 @@ fn run_pair_wizard_inner() -> Result<(), String> {
     let stored = store
         .load_or_create_identity()
         .map_err(|error| format!("device identity initialization failed: {error}"))?;
-    println!("Pierdesk 设备配对");
-    println!("本机指纹：{}", stored.identity.fingerprint());
-    println!("\n两台电脑分别打开此向导：一端选择 1，另一端选择 2。");
-    println!("核对两端出现的 verify_code 完全一致后，必须输入大写 YES。\n");
-    println!("[1] 监听配对");
-    println!("[2] 连接配对");
-    let role = prompt("请选择 1 或 2: ")?;
+    println!("{}", tr!("Pierdesk 设备配对", "Pierdesk device pairing"));
+    println!("{}{}", tr!("本机指纹：", "Local fingerprint: "), stored.identity.fingerprint());
+    println!("{}", tr!("\n两台电脑分别打开此向导：一端选择 1，另一端选择 2。", "\nOpen this wizard on both computers: choose 1 on one and 2 on the other."));
+    println!("{}", tr!("核对两端出现的 verify_code 完全一致后，必须输入大写 YES。\n", "Check that the verify_code on both computers is identical, then type YES in capitals.\n"));
+    println!("{}", tr!("[1] 监听配对", "[1] Listen for pairing"));
+    println!("{}", tr!("[2] 连接配对", "[2] Connect to pair"));
+    let role = prompt(tr!("请选择 1 或 2: ", "Choose 1 or 2: "))?;
     let address_text = match role.as_str() {
-        "1" => prompt("本机监听地址（例如 192.168.1.29:45232）: ")?,
-        "2" => prompt("对端地址（例如 192.168.1.29:45232）: ")?,
-        _ => return Err("只能选择 1 或 2".to_owned()),
+        "1" => prompt(tr!("本机监听地址（例如 192.168.1.29:45232）: ", "Address to listen on (for example 192.168.1.29:45232): "))?,
+        "2" => prompt(tr!("对端地址（例如 192.168.1.29:45232）: ", "Address of the other computer (for example 192.168.1.29:45232): "))?,
+        _ => return Err(tr!("只能选择 1 或 2", "Choose only 1 or 2").to_owned()),
     };
     let mut address_argument = std::iter::once(address_text);
     let address = parse_private_socket(&mut address_argument, "address")?;
     let default_label = if role == "1" {
-        "另一台电脑"
+        tr!("另一台电脑", "Other computer")
     } else {
-        "主机"
+        tr!("主机", "Host")
     };
-    let label = prompt(&format!("给对端起一个名称 [{default_label}]: "))?;
+    let label = prompt(&format!("{} [{default_label}]: ", tr!("给对端起一个名称", "Name for the other computer")))?;
     let label = if label.is_empty() {
         default_label.to_owned()
     } else {
         label
     };
     if label.len() > 128 || label.chars().any(char::is_control) {
-        return Err("设备名称必须为 1 到 128 个 UTF-8 字节且不能包含控制字符".to_owned());
+        return Err(tr!("设备名称必须为 1 到 128 个 UTF-8 字节且不能包含控制字符", "The device name must be 1 to 128 UTF-8 bytes and contain no control characters").to_owned());
     }
-    println!("\n正在建立配对，请保持两端窗口打开...");
+    println!("{}", tr!("\n正在建立配对，请保持两端窗口打开...", "\nEstablishing the pairing. Keep the windows on both computers open..."));
     let pending = if role == "1" {
         listen_for_pairing(store, address, Duration::from_mins(2))
             .map_err(|error| format!("pairing listener failed: {error}"))?
@@ -987,9 +1010,9 @@ fn run_pair_wizard_inner() -> Result<(), String> {
 fn run_trust_wizard() -> Result<(), String> {
     let result = run_trust_wizard_inner();
     if let Err(error) = &result {
-        eprintln!("\n设备管理失败：{error}");
+        eprintln!("\n{}{error}", tr!("设备管理失败：", "Device management failed: "));
     }
-    wait_for_enter("\n按 Enter 关闭此窗口...")?;
+    wait_for_enter(tr!("\n按 Enter 关闭此窗口...", "\nPress Enter to close this window..."))?;
     result
 }
 
@@ -999,32 +1022,32 @@ fn run_trust_wizard_inner() -> Result<(), String> {
     let peers = store
         .list_peers()
         .map_err(|error| format!("trust list failed: {error}"))?;
-    println!("Pierdesk 已配对设备\n");
+    println!("{}", tr!("Pierdesk 已配对设备\n", "Pierdesk paired devices\n"));
     if peers.is_empty() {
-        println!("当前没有已配对设备。");
+        println!("{}", tr!("当前没有已配对设备。", "There are no paired devices."));
         return Ok(());
     }
     for (index, peer) in peers.iter().enumerate() {
         println!("[{}] {}\n    {}", index + 1, peer.label, peer.fingerprint);
     }
-    println!("[0] 仅查看，不做修改");
-    let selection = prompt("\n输入要取消配对的编号: ")?
+    println!("{}", tr!("[0] 仅查看，不做修改", "[0] View only, make no changes"));
+    let selection = prompt(tr!("\n输入要取消配对的编号: ", "\nEnter the number of the device to unpair: "))?
         .parse::<usize>()
-        .map_err(|_| "请输入列表中的数字".to_owned())?;
+        .map_err(|_| tr!("请输入列表中的数字", "Enter a number from the list").to_owned())?;
     if selection == 0 {
         return Ok(());
     }
     let peer = peers
         .get(selection.saturating_sub(1))
-        .ok_or_else(|| "设备编号超出范围".to_owned())?;
-    println!("\n即将取消配对：{} ({})", peer.label, peer.fingerprint);
-    if prompt("输入大写 REVOKE 确认: ")? != "REVOKE" {
-        return Err("未输入大写 REVOKE，没有修改信任列表".to_owned());
+        .ok_or_else(|| tr!("设备编号超出范围", "Device number out of range").to_owned())?;
+    println!("\n{}{} ({})", tr!("即将取消配对：", "About to unpair: "), peer.label, peer.fingerprint);
+    if prompt(tr!("输入大写 REVOKE 确认: ", "Type REVOKE in capitals to confirm: "))? != "REVOKE" {
+        return Err(tr!("未输入大写 REVOKE，没有修改信任列表", "REVOKE was not typed in capitals; the trust list was not changed").to_owned());
     }
     store
         .revoke_peer(peer.fingerprint)
         .map_err(|error| format!("trust revocation failed: {error}"))?;
-    println!("已取消配对：{}", peer.label);
+    println!("{}{}", tr!("已取消配对：", "Unpaired: "), peer.label);
     let _ = pierdesk::tray::reload_existing();
     Ok(())
 }
@@ -1032,9 +1055,9 @@ fn run_trust_wizard_inner() -> Result<(), String> {
 fn run_settings_wizard() -> Result<(), String> {
     let result = run_settings_wizard_inner();
     if let Err(error) = &result {
-        eprintln!("\n连接设置失败：{error}");
+        eprintln!("\n{}{error}", tr!("连接设置失败：", "Connection settings failed: "));
     }
-    wait_for_enter("\n按 Enter 关闭此窗口...")?;
+    wait_for_enter(tr!("\n按 Enter 关闭此窗口...", "\nPress Enter to close this window..."))?;
     result
 }
 
@@ -1049,18 +1072,18 @@ fn run_settings_wizard_inner() -> Result<(), String> {
         .list_peers()
         .map_err(|error| format!("trust list failed: {error}"))?;
     if peers.is_empty() {
-        return Err("当前没有已配对设备，请先从托盘选择“配对新设备”".to_owned());
+        return Err(tr!("当前没有已配对设备，请先从托盘选择“配对新设备”", "There are no paired devices yet. Choose “Pair new device…” from the tray menu first").to_owned());
     }
     let previous = AppSettings::load(&store).ok();
-    println!("Pierdesk 局域网连接设置\n");
-    println!("本机指纹：{}", identity.identity.fingerprint());
-    println!("请选择唯一的活动目标设备：");
+    println!("{}", tr!("Pierdesk 局域网连接设置\n", "Pierdesk LAN connection settings\n"));
+    println!("{}{}", tr!("本机指纹：", "Local fingerprint: "), identity.identity.fingerprint());
+    println!("{}", tr!("请选择唯一的活动目标设备：", "Choose the single active target device:"));
     for (index, peer) in peers.iter().enumerate() {
         let marker = if previous
             .as_ref()
             .is_some_and(|settings| settings.active_peer == peer.fingerprint)
         {
-            "（当前）"
+            tr!("（当前）", "(current)")
         } else {
             ""
         };
@@ -1080,41 +1103,41 @@ fn run_settings_wizard_inner() -> Result<(), String> {
                 .position(|peer| peer.fingerprint == settings.active_peer)
         })
         .map_or(1, |index| index + 1);
-    let selection = prompt_with_default("设备编号", &default_selection.to_string())?
+    let selection = prompt_with_default(tr!("设备编号", "Device number"), &default_selection.to_string())?
         .parse::<usize>()
-        .map_err(|_| "设备编号必须是数字".to_owned())?;
+        .map_err(|_| tr!("设备编号必须是数字", "The device number must be a number").to_owned())?;
     let peer = peers
         .get(selection.saturating_sub(1))
-        .ok_or_else(|| "设备编号超出范围".to_owned())?;
+        .ok_or_else(|| tr!("设备编号超出范围", "Device number out of range").to_owned())?;
 
-    println!("\n每台电脑需要一个固定服务地址，建议端口 45233。");
-    println!("本机地址填写本机真实局域网 IPv4；对端地址填写另一台电脑的地址。");
+    println!("{}", tr!("\n每台电脑需要一个固定服务地址，建议端口 45233。", "\nEach computer needs a fixed service address; port 45233 is recommended."));
+    println!("{}", tr!("本机地址填写本机真实局域网 IPv4；对端地址填写另一台电脑的地址。", "Enter this computer's real LAN IPv4 address as the local address, and the other computer's address as the peer address."));
     let local_default = previous.as_ref().map_or_else(
         || "192.168.1.2:45233".to_owned(),
         |value| value.local_endpoint.to_string(),
     );
-    let local_text = prompt_with_default("本机服务地址", &local_default)?;
-    let local_endpoint = parse_private_socket_text(&local_text, "本机服务地址")?;
+    let local_text = prompt_with_default(tr!("本机服务地址", "Local service address"), &local_default)?;
+    let local_endpoint = parse_private_socket_text(&local_text, tr!("本机服务地址", "Local service address"))?;
     let peer_default = previous.as_ref().map_or_else(
         || "192.168.1.3:45233".to_owned(),
         |value| value.peer_endpoint.to_string(),
     );
-    let peer_text = prompt_with_default("对端服务地址", &peer_default)?;
-    let peer_endpoint = parse_private_socket_text(&peer_text, "对端服务地址")?;
+    let peer_text = prompt_with_default(tr!("对端服务地址", "Peer service address"), &peer_default)?;
+    let peer_endpoint = parse_private_socket_text(&peer_text, tr!("对端服务地址", "Peer service address"))?;
     let auto_default = if previous.as_ref().is_some_and(|value| value.auto_receive) {
         "YES"
     } else {
         "NO"
     };
     let auto_receive = match prompt_with_default(
-        "收到该设备的文件清单后自动替换本机文件剪贴板（YES/NO）",
+        tr!("收到该设备的文件清单后自动替换本机文件剪贴板（YES/NO）", "Automatically replace this computer's file clipboard when a manifest arrives from this device (YES/NO)"),
         auto_default,
     )?
     .as_str()
     {
         "YES" => true,
         "NO" => false,
-        _ => return Err("自动接收设置只能输入大写 YES 或 NO".to_owned()),
+        _ => return Err(tr!("自动接收设置只能输入大写 YES 或 NO", "Automatic receiving accepts only YES or NO in capitals").to_owned()),
     };
     let settings = AppSettings {
         local_endpoint,

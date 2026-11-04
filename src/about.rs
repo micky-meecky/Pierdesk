@@ -32,6 +32,27 @@ pub fn dialog_text() -> String {
     )
 }
 
+/// English version of [`dialog_text`], used when the interface language is English.
+#[must_use]
+pub fn dialog_text_english() -> String {
+    format!(
+        "Pierdesk {}\r\n\
+         Author: {AUTHOR}\r\n\
+         Independent devices, one continuous workflow.\r\n\r\n\
+         Across devices, still like one machine\r\n\
+         Pierdesk connects your paired Windows PCs into one continuous workspace: the mouse crosses screen edges, the keyboard follows the active device, and the clipboard and files keep flowing.\r\n\
+         Core features: cross-screen control, shared clipboard, and LAN file transfer.\r\n\r\n\
+         It does not mirror screens or take over a remote desktop. Each computer keeps running on its own and only synchronizes the input and content it needs over an encrypted LAN connection between paired devices.\r\n\r\n\
+         It remembers earlier pairings, switches quickly between active devices, and offers a graphical screen layout; devices need no reconfiguration when they come back online.\r\n\r\n\
+         Cross the screen edge and keep working.\r\n\r\n\
+         Supported systems: Windows 10 / 11 x64\r\n\
+         License: GPL-3.0-only\r\n\
+         Visual selection component: Snow Apps contributors (GPL-3.0-or-later)\r\n\
+         https://github.com/mg-chao/snow-apps",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 /// Returns the undocumented, side-effect-free creator Easter egg.
 #[must_use]
 pub fn ferry_ticket() -> String {
