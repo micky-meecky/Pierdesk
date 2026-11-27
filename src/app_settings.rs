@@ -29,8 +29,107 @@ const UI_PREFERENCES_FILE: &str = "ui_preferences.v1";
 const UI_PREFERENCES_HEADER: &str = "ClipFerryUiPreferencesV2";
 const LEGACY_UI_PREFERENCES_HEADER: &str = "ClipFerryUiPreferencesV1";
 const UI_PREFERENCES_LIMIT: u64 = 1024;
+const AUTO_UPDATE_SETTINGS_FILE: &str = "auto_update.v1";
+const AUTO_UPDATE_SETTINGS_HEADER: &str = "ClipFerryAutoUpdateSettingsV1";
+const AUTO_UPDATE_SETTINGS_LIMIT: u64 = 1024;
 pub const MIN_UI_FONT_SCALE_PERCENT: u16 = 50;
 pub const MAX_UI_FONT_SCALE_PERCENT: u16 = 125;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AutoUpdateMode {
+    #[default]
+    Silent,
+    Notify,
+    Disabled,
+}
+
+impl AutoUpdateMode {
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Silent => "silent",
+            Self::Notify => "notify",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// Parses a persisted or UI-provided update mode identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is not `silent`, `notify`, or `disabled`.
+    pub fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "silent" => Ok(Self::Silent),
+            "notify" => Ok(Self::Notify),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(invalid_data(
+                "auto update mode must be silent, notify, or disabled",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AutoUpdateSettings {
+    pub mode: AutoUpdateMode,
+}
+
+impl AutoUpdateSettings {
+    /// Loads the persisted auto-update policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the settings file cannot be read or is malformed.
+    pub fn load(store: &DeviceStore) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(auto_update_settings_path(store))?;
+        let length = file.metadata()?.len();
+        if length == 0 || length > AUTO_UPDATE_SETTINGS_LIMIT {
+            return Err(invalid_data(
+                "auto-update settings file length is outside the allowed bounds",
+            ));
+        }
+        let mut text = String::new();
+        file.take(AUTO_UPDATE_SETTINGS_LIMIT + 1)
+            .read_to_string(&mut text)?;
+        decode_auto_update(&text)
+    }
+
+    /// Loads persisted auto-update preferences or returns the first-run default when absent.
+    ///
+    /// # Errors
+    ///
+    /// Existing corrupt or unreadable files are reported instead of silently reset.
+    pub fn load_or_default(store: &DeviceStore) -> io::Result<Self> {
+        match Self::load(store) {
+            Ok(settings) => Ok(settings),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Saves the auto-update preference durably.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the settings directory or file cannot be written.
+    pub fn save(self, store: &DeviceStore) -> io::Result<()> {
+        fs::create_dir_all(store.root())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(auto_update_settings_path(store))?;
+        file.write_all(self.encode().as_bytes())?;
+        file.sync_all()
+    }
+
+    fn encode(self) -> String {
+        format!("{AUTO_UPDATE_SETTINGS_HEADER}\nmode={}\n", self.mode.key())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UiLanguage {
@@ -804,6 +903,38 @@ fn decode_transfer_window(text: &str) -> io::Result<TransferWindowSettings> {
     })
 }
 
+fn decode_auto_update(text: &str) -> io::Result<AutoUpdateSettings> {
+    let mut lines = text.lines();
+    if lines.next() != Some(AUTO_UPDATE_SETTINGS_HEADER) {
+        return Err(invalid_data("unsupported auto-update settings header"));
+    }
+    let mut fields = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| invalid_data("auto-update settings line is missing '='"))?;
+        if key != "mode" {
+            return Err(invalid_data(
+                "auto-update settings contain an unknown field",
+            ));
+        }
+        if fields.insert(key, value).is_some() {
+            return Err(invalid_data(
+                "auto-update settings contain a duplicate field",
+            ));
+        }
+    }
+    if fields.len() != 1 {
+        return Err(invalid_data("auto-update settings are incomplete"));
+    }
+    Ok(AutoUpdateSettings {
+        mode: AutoUpdateMode::parse(required(&fields, "mode")?)?,
+    })
+}
+
 fn parse_flag(value: &str, field: &str) -> io::Result<bool> {
     match value {
         "0" => Ok(false),
@@ -872,6 +1003,10 @@ fn transfer_window_settings_path(store: &DeviceStore) -> PathBuf {
 
 fn ui_preferences_path(store: &DeviceStore) -> PathBuf {
     store.root().join(UI_PREFERENCES_FILE)
+}
+
+fn auto_update_settings_path(store: &DeviceStore) -> PathBuf {
+    store.root().join(AUTO_UPDATE_SETTINGS_FILE)
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -1098,5 +1233,27 @@ mod tests {
             decode_transfer_window("ClipFerryTransferWindowSettingsV1\nauto_popup=yes\n").is_err()
         );
         assert!(decode_transfer_window("ClipFerryTransferWindowSettingsV1\nunknown=1\n").is_err());
+    }
+
+    #[test]
+    fn auto_update_settings_default_to_silent_and_validate_strictly() {
+        assert_eq!(AutoUpdateSettings::default().mode, AutoUpdateMode::Silent);
+        for mode in [
+            AutoUpdateMode::Silent,
+            AutoUpdateMode::Notify,
+            AutoUpdateMode::Disabled,
+        ] {
+            let settings = AutoUpdateSettings { mode };
+            assert_eq!(decode_auto_update(&settings.encode()).unwrap(), settings);
+        }
+        assert!(decode_auto_update("ClipFerryAutoUpdateSettingsV1\n").is_err());
+        assert!(decode_auto_update("ClipFerryAutoUpdateSettingsV1\nmode=auto\n").is_err());
+        assert!(
+            decode_auto_update("ClipFerryAutoUpdateSettingsV1\nmode=silent\nmode=notify\n")
+                .is_err()
+        );
+        assert!(
+            decode_auto_update("ClipFerryAutoUpdateSettingsV1\nmode=silent\nextra=1\n").is_err()
+        );
     }
 }

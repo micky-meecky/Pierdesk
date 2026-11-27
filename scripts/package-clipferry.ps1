@@ -26,6 +26,18 @@ try {
     [IO.File]::WriteAllText($manifest, [regex]::Replace($text, $pattern, "version = `"$next`""), [Text.UTF8Encoding]::new($false))
     Write-Host "Packaging Pierdesk $current -> $next"
     Push-Location $root
+    $prevUpdatePubKey = $env:PIERDESK_UPDATE_PUBLIC_KEY
+    $prevUpdatePrimary = $env:PIERDESK_UPDATE_PRIMARY_URL
+    $updateReleaseConfig = Join-Path $PSScriptRoot 'update-release.local.psd1'
+    if (Test-Path -LiteralPath $updateReleaseConfig -PathType Leaf) {
+        $updateCfg = Import-PowerShellDataFile -Path $updateReleaseConfig
+        if (-not $env:PIERDESK_UPDATE_PUBLIC_KEY -and $updateCfg.UpdatePublicKey) {
+            $env:PIERDESK_UPDATE_PUBLIC_KEY = ([string]$updateCfg.UpdatePublicKey).Trim()
+        }
+        if (-not $env:PIERDESK_UPDATE_PRIMARY_URL -and $updateCfg.PrimaryManifestUrl) {
+            $env:PIERDESK_UPDATE_PRIMARY_URL = ([string]$updateCfg.PrimaryManifestUrl).Trim()
+        }
+    }
     try {
         & $env:ComSpec /d /c "`"$VcVars`" >nul && `"$Cargo`" build --offline --release --bin pierdesk"
         if ($LASTEXITCODE -ne 0) { throw "Release build failed; $next remains reserved. Previous dist preserved." }
@@ -45,8 +57,8 @@ try {
         $incoming = Join-Path $dist 'pierdesk.package.tmp'
         Copy-Item -LiteralPath $binary -Destination $incoming -Force
         if ((Get-FileHash -LiteralPath $incoming).Hash -ne $hash) { throw 'Packaging copy checksum mismatch.' }
-        Move-Item -LiteralPath $incoming -Destination (Join-Path $dist 'pierdesk.exe') -Force
-        [ordered]@{version=$next; sha256=$hash; builtAt=(Get-Date).ToString('o'); file='pierdesk.exe'} |
+        Move-Item -LiteralPath $incoming -Destination (Join-Path $dist 'clipferry.exe') -Force
+        [ordered]@{version=$next; sha256=$hash; builtAt=(Get-Date).ToString('o'); file='clipferry.exe'} |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dist 'release.json') -Encoding UTF8
         if ($SkipRemoteDeploy) {
             Write-Host 'Remote deployment skipped explicitly; artifact is for local testing.'
@@ -54,5 +66,9 @@ try {
             & "$PSScriptRoot\deploy-clipferry-ssh.ps1"
             if ($LASTEXITCODE -ne 0) { throw 'Artifact is built, but one or more remote deployments failed; do not report all machines updated.' }
         }
-    } finally { Pop-Location }
+    } finally {
+        if ($null -eq $prevUpdatePubKey) { Remove-Item Env:PIERDESK_UPDATE_PUBLIC_KEY -ErrorAction SilentlyContinue } else { $env:PIERDESK_UPDATE_PUBLIC_KEY = $prevUpdatePubKey }
+        if ($null -eq $prevUpdatePrimary) { Remove-Item Env:PIERDESK_UPDATE_PRIMARY_URL -ErrorAction SilentlyContinue } else { $env:PIERDESK_UPDATE_PRIMARY_URL = $prevUpdatePrimary }
+        Pop-Location
+    }
 } finally { $lock.Dispose() }

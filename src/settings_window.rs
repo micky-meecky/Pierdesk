@@ -152,6 +152,11 @@ pub enum SettingsWindowCommand {
     SetHistoryLimit(usize),
     SetHistoryRowHeight(u16),
     SetAutostart(bool),
+    SetAutoUpdateMode(String),
+    CheckForUpdates,
+    DownloadUpdate,
+    ApplyUpdateNow,
+    OpenUpdateNotes,
     SetLanguage(String),
     SetTheme(String),
     SetFontScale(u16),
@@ -268,6 +273,8 @@ struct WebCommand {
     #[serde(default)]
     language: Option<String>,
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     theme: Option<String>,
     #[serde(default)]
     graph_positions: Option<BTreeMap<String, BoundaryGraphPoint>>,
@@ -339,10 +346,7 @@ impl SettingsWindow {
         #[cfg(feature = "licensing")]
         let (wechat_support_data, alipay_support_data) = (String::new(), String::new());
         let html = WEB_CONTENT
-            .replace(
-                "/*__LICENSE_JS__*/",
-                LICENSE_JS,
-            )
+            .replace("/*__LICENSE_JS__*/", LICENSE_JS)
             .replace("__PIERDESK_ICON__", &icon_data)
             .replace("__WECHAT_SUPPORT_QR__", &wechat_support_data)
             .replace("__ALIPAY_SUPPORT_QR__", &alipay_support_data)
@@ -793,6 +797,16 @@ impl ProcedureState {
                 command.enabled,
                 "设置窗口缺少自启动状态",
             )?)),
+            "set-auto-update-mode" => {
+                self.enqueue(SettingsWindowCommand::SetAutoUpdateMode(required(
+                    command.mode,
+                    "设置窗口缺少自动更新策略",
+                )?));
+            }
+            "check-updates" => self.enqueue(SettingsWindowCommand::CheckForUpdates),
+            "download-update" => self.enqueue(SettingsWindowCommand::DownloadUpdate),
+            "apply-update" => self.enqueue(SettingsWindowCommand::ApplyUpdateNow),
+            "open-update-notes" => self.enqueue(SettingsWindowCommand::OpenUpdateNotes),
             "set-language" => self.enqueue(SettingsWindowCommand::SetLanguage(required(
                 command.language,
                 "设置窗口缺少语言",
@@ -1931,6 +1945,74 @@ mod tests {
         assert_eq!(restored_graph, serde_json::json!([321, 187]));
     }
 
+    fn assert_sidebar_scroll_persists_across_model_updates(window: &SettingsWindow) {
+        let setup = evaluate_webview(
+            window,
+            r"(()=>{
+              const sidebar = document.querySelector('.sidebar');
+              const firstButton = sidebar?.querySelector('.nav-button');
+              if (!sidebar || !firstButton) return null;
+              sidebar.style.height = '260px';
+              sidebar.style.minHeight = '260px';
+              sidebar.style.maxHeight = '260px';
+              sidebar.scrollTop = 140;
+              state.sidebarScrollTop = sidebar.scrollTop;
+              window.__testSidebar = sidebar;
+              window.__testFirstNav = firstButton;
+              return [sidebar.scrollHeight > sidebar.clientHeight, Math.round(sidebar.scrollTop)];
+            })()",
+        );
+        assert_eq!(setup[0], serde_json::json!(true));
+        let initial_scroll = setup[1].as_i64().unwrap_or(0);
+        assert!(initial_scroll >= 100, "unexpected initial scroll: {setup}");
+
+        // Model updates must keep the sidebar DOM node and scroll offset intact.
+        let after_model = evaluate_webview(
+            window,
+            r"(()=>{
+              const m = currentModel();
+              m.cross.latency = '3.4 ms';
+              render();
+              const sidebar = document.querySelector('.sidebar');
+              const firstButton = sidebar?.querySelector('.nav-button');
+              const sameSidebar = sidebar === window.__testSidebar;
+              const sameButton = firstButton === window.__testFirstNav;
+              const scrollAfterModel = Math.round(sidebar.scrollTop);
+              // Active scrolling defers background model renders until idle.
+              markScrolling();
+              const deferredWhileScrolling = shouldDeferModelRender();
+              clearTimeout(state.scrollTimer);
+              state.scrolling = false;
+              // Language switch rebuilds nav labels but still preserves sidebar container and scroll.
+              const prevLang = m.language;
+              m.language = 'en';
+              render();
+              const enLabel = document.querySelector('.nav-button[data-page=status] .nav-label')?.textContent;
+              const scrollAfterEn = Math.round(document.querySelector('.sidebar').scrollTop);
+              m.language = prevLang;
+              render();
+              const zhLabel = document.querySelector('.nav-button[data-page=status] .nav-label')?.textContent;
+              const scrollAfterZh = Math.round(document.querySelector('.sidebar').scrollTop);
+              const sameSidebarAfterLang = document.querySelector('.sidebar') === window.__testSidebar;
+              sidebar.style.height = '';
+              sidebar.style.minHeight = '';
+              sidebar.style.maxHeight = '';
+              delete window.__testSidebar;
+              delete window.__testFirstNav;
+              return [sameSidebar, sameButton, scrollAfterModel, deferredWhileScrolling, enLabel, scrollAfterEn, zhLabel, scrollAfterZh, sameSidebarAfterLang];
+            })()",
+        );
+        assert_eq!(after_model[0], serde_json::json!(true));
+        assert_eq!(after_model[1], serde_json::json!(true));
+        assert_eq!(after_model[2].as_i64(), Some(initial_scroll));
+        assert_eq!(after_model[3], serde_json::json!(true));
+        assert_eq!(after_model[4], serde_json::json!("Status overview"));
+        assert_eq!(after_model[5].as_i64(), Some(initial_scroll));
+        assert_eq!(after_model[6], serde_json::json!("状态总览"));
+        assert_eq!(after_model[7].as_i64(), Some(initial_scroll));
+        assert_eq!(after_model[8], serde_json::json!(true));
+    }
+
     fn assert_english_dynamic_text_is_localized(window: &SettingsWindow) {
         assert_eq!(
             evaluate_webview(
@@ -1981,7 +2063,7 @@ mod tests {
         );
     }
 
-#[cfg(feature = "licensing")]
+    #[cfg(feature = "licensing")]
     fn assert_license_page(window: &SettingsWindow) {
         window.show("license").unwrap();
         let mut license_page = serde_json::Value::Null;
@@ -2147,6 +2229,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(font_scale, serde_json::json!(["50", "125"]));
+        assert_sidebar_scroll_persists_across_model_updates(&window);
         assert_english_dynamic_text_is_localized(&window);
         assert!(window.state.webview.borrow().is_some());
         window.state.hide(window.handle);

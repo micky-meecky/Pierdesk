@@ -166,6 +166,35 @@ fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> i
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DragHelperLaunchMode {
+    /// Elevated parent asks Explorer's desktop automation view to run the short-lived
+    /// launcher, which then spawns the receiver with `STARTF_FORCEOFFFEEDBACK` using
+    /// the interactive desktop token.
+    DesktopShell,
+    /// Non-elevated parent already owns the interactive desktop token and spawns the
+    /// receiver directly with `STARTF_FORCEOFFFEEDBACK`, avoiding the parent's Explorer
+    /// startup feedback state without COM shell indirection.
+    DirectNoFeedback,
+}
+
+impl DragHelperLaunchMode {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::DesktopShell => "desktop_shell_helper",
+            Self::DirectNoFeedback => "direct_helper",
+        }
+    }
+}
+
+pub(super) const fn drag_helper_launch_mode(elevated: bool) -> DragHelperLaunchMode {
+    if elevated {
+        DragHelperLaunchMode::DesktopShell
+    } else {
+        DragHelperLaunchMode::DirectNoFeedback
+    }
+}
+
 pub(super) struct DragCaptureHelper {
     writer: TcpStream,
     reader: FrameReader,
@@ -173,6 +202,7 @@ pub(super) struct DragCaptureHelper {
     pub(super) elevated: bool,
     pub(super) bounds: [i32; 4],
     pub(super) startup_flags: u32,
+    pub(super) launch_mode: DragHelperLaunchMode,
 }
 
 pub(super) enum DragCaptureEvent {
@@ -181,11 +211,25 @@ pub(super) enum DragCaptureEvent {
 }
 
 impl DragCaptureHelper {
-    #[allow(clippy::too_many_lines)]
     pub(super) fn start(
         runtime_root: &Path,
         edge: DragProbeEdge,
         thickness: u32,
+    ) -> io::Result<Self> {
+        Self::start_with_mode(
+            runtime_root,
+            edge,
+            thickness,
+            DragHelperLaunchMode::DesktopShell,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn start_with_mode(
+        runtime_root: &Path,
+        edge: DragProbeEdge,
+        thickness: u32,
+        launch_mode: DragHelperLaunchMode,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
@@ -200,15 +244,24 @@ impl DragCaptureHelper {
                 text
             });
         let (helper_path, helper_digest) = prepare_helper_copy(runtime_root)?;
-        launch_through_desktop_shell(
-            &helper_path,
-            &format!(
-                "file-drag-edge-launcher --port {} --token {} --edge {} --thickness {thickness}",
+        match launch_mode {
+            DragHelperLaunchMode::DesktopShell => launch_through_desktop_shell(
+                &helper_path,
+                &format!(
+                    "file-drag-edge-launcher --port {} --token {} --edge {} --thickness {thickness}",
+                    address.port(),
+                    token,
+                    edge.label(),
+                ),
+            )?,
+            DragHelperLaunchMode::DirectNoFeedback => spawn_drag_edge_helper_process(
+                &helper_path,
                 address.port(),
-                token,
-                edge.label(),
-            ),
-        )?;
+                &token,
+                edge,
+                thickness,
+            )?,
+        }
 
         let deadline = Instant::now() + HELPER_START_TIMEOUT;
         let mut last_rejection = None;
@@ -220,7 +273,14 @@ impl DragCaptureHelper {
                         continue;
                     }
                     stream.set_nonblocking(false)?;
-                    stream.set_read_timeout(Some(HELPER_IO_TIMEOUT))?;
+                    // The helper connects before creating/registering its OLE window. That
+                    // startup work can exceed the normal 500 ms command timeout after a display
+                    // change or Explorer load. Give HELLO the remaining startup budget.
+                    stream.set_read_timeout(Some(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .max(Duration::from_millis(1)),
+                    ))?;
                     stream.set_write_timeout(Some(HELPER_IO_TIMEOUT))?;
                     let (received, elevated, process_id, bounds, startup_flags) =
                         match read_frame_blocking::<HelperEvent>(&mut stream) {
@@ -282,6 +342,7 @@ impl DragCaptureHelper {
                         elevated,
                         bounds,
                         startup_flags,
+                        launch_mode,
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -747,12 +808,17 @@ pub fn run_drag_edge_helper(
     }
 }
 
-/// Start the background receiver with the desktop token but without Shell's GUI
-/// startup cursor feedback. The short-lived launcher itself creates no window.
-///
-/// # Errors
-/// Returns executable lookup or native process creation errors.
-pub fn launch_drag_edge_helper(
+fn no_feedback_startup_info() -> io::Result<STARTUPINFOW> {
+    Ok(STARTUPINFOW {
+        cb: u32::try_from(std::mem::size_of::<STARTUPINFOW>()).map_err(invalid_data)?,
+        dwFlags: STARTF_FORCEOFFFEEDBACK | STARTF_USESHOWWINDOW,
+        wShowWindow: 0,
+        ..STARTUPINFOW::default()
+    })
+}
+
+fn spawn_drag_edge_helper_process(
+    executable: &Path,
     port: u16,
     token: &str,
     edge: DragProbeEdge,
@@ -761,25 +827,19 @@ pub fn launch_drag_edge_helper(
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid_data("invalid drag helper token"));
     }
-    let executable = std::env::current_exe()?;
     let application: Vec<u16> = executable
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect();
     let mut command = OsString::from("\"");
-    command.push(&executable);
+    command.push(executable);
     command.push(format!(
         "\" file-drag-edge-helper --port {port} --token {token} --edge {} --thickness {thickness}",
         edge.label()
     ));
     let mut command: Vec<u16> = command.encode_wide().chain(Some(0)).collect();
-    let startup = STARTUPINFOW {
-        cb: u32::try_from(std::mem::size_of::<STARTUPINFOW>()).map_err(invalid_data)?,
-        dwFlags: STARTF_FORCEOFFFEEDBACK | STARTF_USESHOWWINDOW,
-        wShowWindow: 0,
-        ..STARTUPINFOW::default()
-    };
+    let startup = no_feedback_startup_info()?;
     let mut process = PROCESS_INFORMATION::default();
     // No inherited handles or changed token. Nonce / PID / image authentication
     // in the parent still applies to the actual receiver, not the launcher.
@@ -803,19 +863,24 @@ pub fn launch_drag_edge_helper(
     Ok(())
 }
 
-/// Launches the native edge helper and verifies its authenticated IPC handshake.
+/// Start the background receiver with the desktop token but without Shell's GUI
+/// startup cursor feedback. The short-lived launcher itself creates no window.
 ///
 /// # Errors
-///
-/// Returns an error when the helper cannot be copied, launched through the interactive desktop,
-/// authenticated, or controlled through its loopback channel.
-pub fn run_drag_helper_self_test(runtime_root: &Path) -> io::Result<(u32, bool, [i32; 4])> {
-    let _ole = OleApartment::new()?;
-    let mut helper = DragCaptureHelper::start(runtime_root, DragProbeEdge::Top, 8)?;
+/// Returns executable lookup or native process creation errors.
+pub fn launch_drag_edge_helper(
+    port: u16,
+    token: &str,
+    edge: DragProbeEdge,
+    thickness: u32,
+) -> io::Result<()> {
+    let executable = std::env::current_exe()?;
+    spawn_drag_edge_helper_process(&executable, port, token, edge, thickness)
+}
+
+fn verify_helper_visibility(helper: &mut DragCaptureHelper, rounds: usize) -> io::Result<()> {
     helper.set_visible(false)?;
-    // Exercise Explorer-launched visibility, not merely the IPC handshake. This
-    // explicit diagnostic never moves the pointer or synthesizes button input.
-    for _ in 0..12 {
+    for _ in 0..rounds {
         for visible in [true, false] {
             write_frame(
                 &mut helper.writer,
@@ -844,6 +909,30 @@ pub fn run_drag_helper_self_test(runtime_root: &Path) -> io::Result<(u32, bool, 
             std::thread::sleep(Duration::from_millis(180));
         }
     }
+    Ok(())
+}
+
+/// Launches the native edge helper and verifies its authenticated IPC handshake.
+///
+/// # Errors
+///
+/// Returns an error when the helper cannot be copied, launched through the interactive desktop,
+/// authenticated, or controlled through its loopback channel.
+pub fn run_drag_helper_self_test(runtime_root: &Path) -> io::Result<(u32, bool, [i32; 4])> {
+    let _ole = OleApartment::new()?;
+    // Exercise both the direct non-elevated launch path and the Explorer desktop-token path.
+    // Neither path moves the pointer or synthesizes button input.
+    let mut direct_helper = DragCaptureHelper::start_with_mode(
+        runtime_root,
+        DragProbeEdge::Top,
+        8,
+        DragHelperLaunchMode::DirectNoFeedback,
+    )?;
+    verify_helper_visibility(&mut direct_helper, 4)?;
+    drop(direct_helper);
+
+    let mut helper = DragCaptureHelper::start(runtime_root, DragProbeEdge::Top, 8)?;
+    verify_helper_visibility(&mut helper, 12)?;
     let result = (helper.process_id, helper.elevated, helper.bounds);
     drop(helper);
     Ok(result)
@@ -856,6 +945,44 @@ mod tests {
     #[test]
     fn launcher_rejects_invalid_nonce_before_spawning() {
         assert!(launch_drag_edge_helper(1, "invalid", DragProbeEdge::Top, 8).is_err());
+    }
+
+    #[test]
+    fn helper_launch_mode_isolates_startup_feedback_for_all_privileges() {
+        assert_eq!(
+            drag_helper_launch_mode(true),
+            DragHelperLaunchMode::DesktopShell
+        );
+        assert_eq!(
+            drag_helper_launch_mode(false),
+            DragHelperLaunchMode::DirectNoFeedback
+        );
+        assert_eq!(
+            DragHelperLaunchMode::DesktopShell.label(),
+            "desktop_shell_helper"
+        );
+        assert_eq!(
+            DragHelperLaunchMode::DirectNoFeedback.label(),
+            "direct_helper"
+        );
+    }
+
+    #[test]
+    fn direct_helper_startup_info_disables_cursor_feedback() {
+        let startup = no_feedback_startup_info().unwrap();
+        assert_ne!(startup.dwFlags.0 & STARTF_FORCEOFFFEEDBACK.0, 0);
+        assert_ne!(startup.dwFlags.0 & STARTF_USESHOWWINDOW.0, 0);
+        assert_eq!(startup.wShowWindow, 0);
+        assert!(
+            spawn_drag_edge_helper_process(
+                Path::new("nonexistent.exe"),
+                1,
+                "invalid",
+                DragProbeEdge::Top,
+                8
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -43,6 +43,8 @@
       --peer-text: #126b58;
       --track: #e5e9ef;
       --story-text: #354052;
+      --scrollbar-thumb: rgba(105, 115, 134, .28);
+      --scrollbar-thumb-hover: rgba(105, 115, 134, .46);
       font-family: "Segoe UI Variable", "Microsoft YaHei UI", "Segoe UI", sans-serif;
       font-size: 16px;
       background: var(--canvas);
@@ -83,6 +85,8 @@
       --peer-text: #8ce4c9;
       --track: #313a48;
       --story-text: #d6deea;
+      --scrollbar-thumb: rgba(170, 180, 197, .24);
+      --scrollbar-thumb-hover: rgba(170, 180, 197, .42);
     }
 
     * { box-sizing: border-box; }
@@ -147,8 +151,24 @@
       align-self: stretch;
       padding: 26px 12px;
       overflow: auto;
+      scrollbar-gutter: stable;
       border-right: 1px solid var(--border);
       background: var(--sidebar-bg);
+    }
+    .sidebar, .content {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+    .sidebar::-webkit-scrollbar, .content::-webkit-scrollbar { width: 8px; height: 8px; }
+    .sidebar::-webkit-scrollbar-track, .content::-webkit-scrollbar-track { background: transparent; }
+    .sidebar::-webkit-scrollbar-thumb, .content::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background-clip: content-box;
+      background-color: var(--scrollbar-thumb);
+    }
+    .sidebar::-webkit-scrollbar-thumb:hover, .content::-webkit-scrollbar-thumb:hover {
+      background-color: var(--scrollbar-thumb-hover);
     }
     .nav { display: grid; gap: 6px; }
     .nav-button {
@@ -713,7 +733,7 @@
       return pages.filter(([key]) => key === 'license' ? licensed : key === 'support' ? !licensed : true);
     }
 
-    const state = { page: 'status', model: null, modal: null, connectionDraft: null, interacting: false, modelDirty: false, draggedPeer: '', pendingLayout: null, pendingLayoutTimer: 0, scrollByPage: Object.create(null), scrollResetPage: '', selectionTimer: 0, sshHostKeysOpen: false, sshConnectionHostKeysOpen: false, telemetry: { lastSampleAt: 0, links: Object.create(null), events: [], sharedGeneration: null, transferGeneration: null } };
+    const state = { page: 'status', model: null, modal: null, connectionDraft: null, interacting: false, scrolling: false, scrollTimer: 0, modelDirty: false, draggedPeer: '', pendingLayout: null, pendingLayoutTimer: 0, scrollByPage: Object.create(null), sidebarScrollTop: 0, scrollResetPage: '', selectionTimer: 0, topbarSignature: '', navSignature: '', modalHtml: '', sshHostKeysOpen: false, sshConnectionHostKeysOpen: false, telemetry: { lastSampleAt: 0, links: Object.create(null), events: [], sharedGeneration: null, transferGeneration: null } };
 
     const demoModel = {
       type: 'model', licenseEnabled: true, version: '1.0.0', language: 'zh-CN', theme: 'light', fontScale: 100, connected: true, peerLabel: 'DESKTOP-STUDIO', localLabel: 'THIS-PC',
@@ -742,6 +762,7 @@
       shared: { enabled: true, generation: 3, lastDirection: '发送', lastFormats: '文字 + HTML', lastBytes: '12.6 KB', lastUnits: 2184 },
       transfer: { generation: 2, pendingOffer: false, autoPopup: true, historyLimit: 20, rowHeight: 76, tasks: [{ key: 'receive-1', name: 'project-assets.zip', files: 24, directories: 2, direction: '接收', directionDetail: 'DESKTOP-STUDIO → 本机', state: '正在接收', stateCode: 'running', progress: 36.3, transferred: '186 MB', total: '512 MB', speed: '24.8 MB/s' }] },
       recentManifest: { name: 'project-assets.zip', files: 24, directories: 2, size: '186 MB' },
+      autoUpdate: { mode: 'silent', phase: 'up_to_date', configured: true, currentVersion: '1.0.64', availableVersion: '', notesUrl: '', progressPercent: 0, downloadedText: '', totalText: '', lastCheckedUnix: 0, lastError: '', targetWritable: true, canInstallNow: false, primarySourceConfigured: true },
       lastError: '', logPath: '%LOCALAPPDATA%\\ClipFerry\\logs\\clipferry.log'
     };
 
@@ -857,7 +878,36 @@
       '按电脑对单独开启或关闭跨屏控制。不会修改边界设置，也不会解除配对。':'Turn cross-screen control on or off for one pair of computers. Boundary settings and pairing are not changed.',
       '对端离线':'Peer offline', '跨屏已开启':'Cross-screen on', '跨屏已停用':'Cross-screen off',
       '请先开启跨屏控制':'Turn on cross-screen control first', '两台电脑需同时在线才能切换':'Both computers must be online to switch',
-      '与此设备的跨屏控制：':'Cross-screen control with '
+      '与此设备的跨屏控制：':'Cross-screen control with ',
+      '软件更新':'Software updates',
+      '自动更新策略':'Update policy',
+      '自动静默更新':'Automatic silent updates',
+      '仅提醒我':'Notify me only',
+      '关闭自动检查':'Off (manual check only)',
+      '后台检查并静默下载新版，在空闲或下次启动时自动完成切换':'Checks and downloads updates quietly in the background, applying them when idle or on next launch',
+      '仅在后台检查并提醒有新版本，确认后再下载和更新':'Checks in the background and notifies you; downloads only when you confirm',
+      '不自动联网检查更新；你仍可随时点击右侧按钮手动检查':'Automatic update checks are off; you can still check manually at any time',
+      '立即检查更新':'Check now',
+      '正在检查…':'Checking…',
+      '下载并更新':'Download & update',
+      '立即重启更新':'Restart to update',
+      '查看更新日志':'Release notes',
+      '已是最新版本':'Up to date',
+      '正在检查更新':'Checking for updates',
+      '正在下载':'Downloading',
+      '已就绪，待自动切换':'Ready to update',
+      '需要管理员确认':'Elevation required',
+      '正在应用更新':'Applying update',
+      '发现新版本':'Update available',
+      '检查失败':'Check failed',
+      '自编译版本':'Custom build',
+      '仅从公开更新源读取静态版本清单，不上传任何设备或使用信息。':'Reads only a static release manifest; never uploads device or usage data.',
+      '当前构建未内置发布签名公钥，已停用自动静默更新。':'This build has no embedded release signing key; automatic updates are disabled.',
+      '新版本已校验就绪，将在电脑空闲或下次启动时自动静默更新。':'Verified and ready; will switch silently when idle or on next launch.',
+      '新版本已校验就绪，由于安装目录受系统保护，点击“立即重启更新”确认授权即可完成更新。':'Verified and ready; this install folder requires administrator confirmation to replace.',
+      '已开始检查更新':'Checking for updates',
+      '已开始后台下载新版本':'Downloading update in background',
+      '正在启动更新程序…':'Launching updater…'
     })) en.set(zh, value);
 
     function translateKnownText(text) {
@@ -977,30 +1027,55 @@
       return translated.split(' · ').map(translateKnownText).join(' · ');
     }
 
-    function localizeDocument() {
+    function localizeNode(container) {
       const language = currentModel().language || 'en';
-      document.documentElement.lang = language;
-      document.title = language === 'en' ? 'Pierdesk Settings' : 'Pierdesk 设置';
-      if (language !== 'en') return;
-      const root = document.getElementById('root');
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      if (language !== 'en' || !container) return;
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
         const raw = node.nodeValue, trimmed = raw.trim();
         if (!trimmed) continue;
         const translated = translateText(trimmed);
         if (translated !== trimmed) node.nodeValue = raw.replace(trimmed, translated);
       }
-      root.querySelectorAll('[aria-label],[title],[placeholder],[alt]').forEach(node => {
+      if (container.nodeType === Node.ELEMENT_NODE) {
+        for (const attribute of ['aria-label','title','placeholder','alt']) if (container.hasAttribute(attribute)) container.setAttribute(attribute, translateText(container.getAttribute(attribute)));
+      }
+      container.querySelectorAll('[aria-label],[title],[placeholder],[alt]').forEach(node => {
         for (const attribute of ['aria-label','title','placeholder','alt']) if (node.hasAttribute(attribute)) node.setAttribute(attribute, translateText(node.getAttribute(attribute)));
       });
     }
 
-    function shell(pageHtml) {
+    function localizeDocument(container = document.getElementById('root')) {
+      const language = currentModel().language || 'en';
+      document.documentElement.lang = language;
+      document.title = language === 'en' ? 'Pierdesk Settings' : 'Pierdesk 设置';
+      localizeNode(container);
+    }
+
+    function ensureShell() {
+      const root = document.getElementById('root');
+      if (root.querySelector('.app')) return root;
+      root.innerHTML = `<div class="app">
+        <header class="topbar" data-drag-region></header>
+        <aside class="sidebar"><nav class="nav" aria-label="设置页面"></nav></aside>
+        <main class="content"></main>
+      </div>${['top','right','bottom','left','top-left','top-right','bottom-left','bottom-right'].map(edge=>`<div class="resize-handle ${edge.includes('-')?'corner':''}" data-edge="${edge}" aria-hidden="true"></div>`).join('')}<div id="modal-host"></div>`;
+      state.topbarSignature = '';
+      state.navSignature = '';
+      state.modalHtml = '';
+      return root;
+    }
+
+    function syncTopbar(root) {
       const m = currentModel();
+      const language = m.language || 'en';
       const onlinePeerCount = (m.peers || []).filter(peer => peer.online).length;
-      return `<div class="app">
-        <header class="topbar" data-drag-region>
-          <div class="brand"><img src="__PIERDESK_ICON__" alt=""><strong>Pierdesk 设置</strong></div>
+      const signature = `${language}|${m.theme === 'dark' ? 'dark' : 'light'}|${onlinePeerCount}`;
+      if (state.topbarSignature === signature) return;
+      state.topbarSignature = signature;
+      const topbar = root.querySelector('.topbar');
+      if (!topbar) return;
+      topbar.innerHTML = `<div class="brand"><img src="__PIERDESK_ICON__" alt=""><strong>Pierdesk 设置</strong></div>
           <div class="top-actions">
             <button class="appearance-toggle" data-action="toggle-theme" title="切换亮色/暗色模式" aria-label="切换亮色/暗色模式">${svg(m.theme === 'dark' ? 'sun' : 'moon')}<span>${m.theme === 'dark' ? '亮色模式' : '暗色模式'}</span></button>
             <div class="connection-pill"><span class="dot ${onlinePeerCount ? 'green' : ''}"></span>${onlinePeerCount ? `${onlinePeerCount} 台设备在线` : '尚未连接'}</div>
@@ -1009,11 +1084,31 @@
               <button class="window-button" data-window="maximize" aria-label="最大化">${svg('square')}</button>
               <button class="window-button close" data-window="close" aria-label="关闭">${svg('close')}</button>
             </div>
-          </div>
-        </header>
-        <aside class="sidebar"><nav class="nav" aria-label="设置页面">${visiblePages().map(([key,label,ico]) => `<button class="nav-button ${state.page === key ? 'active' : ''}" data-page="${key}" ${state.page === key ? 'aria-current="page"' : ''}>${svg(ico,'nav-icon')}<span class="nav-label">${label}</span></button>`).join('')}</nav></aside>
-        <main class="content"><section class="page">${sshNotice()}${pageHtml}</section></main>
-      </div>${['top','right','bottom','left','top-left','top-right','bottom-left','bottom-right'].map(edge=>`<div class="resize-handle ${edge.includes('-')?'corner':''}" data-edge="${edge}" aria-hidden="true"></div>`).join('')}${state.modal ? renderModal(state.modal) : ''}`;
+          </div>`;
+      localizeNode(topbar);
+    }
+
+    function syncSidebar(root) {
+      const m = currentModel();
+      const language = m.language || 'en';
+      const pagesList = visiblePages();
+      const signature = `${language}|${pagesList.map(([key]) => key).join(',')}`;
+      const sidebar = root.querySelector('.sidebar');
+      const nav = sidebar?.querySelector('.nav');
+      if (!sidebar || !nav) return;
+      if (state.navSignature !== signature) {
+        state.navSignature = signature;
+        nav.setAttribute('aria-label', '设置页面');
+        nav.innerHTML = pagesList.map(([key,label,ico]) => `<button class="nav-button" data-page="${key}">${svg(ico,'nav-icon')}<span class="nav-label">${label}</span></button>`).join('');
+        localizeNode(nav);
+      }
+      nav.querySelectorAll('.nav-button').forEach(button => {
+        const active = button.dataset.page === state.page;
+        button.classList.toggle('active', active);
+        if (active) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+      });
+      if (sidebar.scrollTop !== state.sidebarScrollTop) sidebar.scrollTop = state.sidebarScrollTop;
     }
     function heading(title, subtitle) { return `<div class="page-heading"><h1>${title}</h1><p class="subtitle">${subtitle}</p></div>`; }
 
@@ -1323,11 +1418,80 @@
       </div><aside class="card connection-help"><h2>适用场景</h2><ul><li>VPN 改变了默认局域网路由</li><li>电脑同时连接多个专用网络</li><li>虚拟网卡占用了对端地址</li></ul><div class="divider"></div><p class="small">检测到地址冲突时，Pierdesk 会保留原配置并暂停该路径；冲突解除后自动恢复。</p><p class="small">每次只能选择一个活动目标设备。</p></aside></div>`;
     }
 
+    function renderUpdateSection(m) {
+      const u = m.autoUpdate || { mode: 'silent', phase: 'idle', configured: false, currentVersion: m.version || '', availableVersion: '', notesUrl: '', progressPercent: 0, downloadedText: '', totalText: '', lastCheckedUnix: 0, lastError: '', targetWritable: true, canInstallNow: false };
+      const enMode = m.language === 'en';
+      const modeDesc = u.mode === 'notify'
+        ? '仅在后台检查并提醒有新版本，确认后再下载和更新'
+        : u.mode === 'disabled'
+          ? '不自动联网检查更新；你仍可随时点击右侧按钮手动检查'
+          : '后台检查并静默下载新版，在空闲或下次启动时自动完成切换';
+      let badgeText = '已是最新版本', badgeColor = 'green', detailText = '';
+      if (!u.configured || u.phase === 'unconfigured') {
+        badgeText = '自编译版本'; badgeColor = '';
+        detailText = '当前构建未内置发布签名公钥，已停用自动静默更新。';
+      } else if (u.phase === 'checking') {
+        badgeText = '正在检查更新'; badgeColor = 'blue';
+      } else if (u.phase === 'downloading') {
+        badgeText = enMode ? `Downloading ${u.progressPercent || 0}%` : `正在下载 ${u.progressPercent || 0}%`;
+        badgeColor = 'blue';
+        detailText = u.totalText ? `${u.downloadedText || '0 B'} / ${u.totalText}` : '';
+      } else if (u.phase === 'ready_to_install') {
+        badgeText = enMode ? `v${u.availableVersion} ready` : `v${u.availableVersion} 已就绪`;
+        badgeColor = 'green';
+        detailText = '新版本已校验就绪，将在电脑空闲或下次启动时自动静默更新。';
+      } else if (u.phase === 'needs_elevation') {
+        badgeText = '需要管理员确认'; badgeColor = 'amber';
+        detailText = '新版本已校验就绪，由于安装目录受系统保护，点击“立即重启更新”确认授权即可完成更新。';
+      } else if (u.phase === 'applying') {
+        badgeText = '正在应用更新'; badgeColor = 'blue';
+      } else if (u.phase === 'update_available') {
+        badgeText = enMode ? `v${u.availableVersion} available` : `发现新版本 v${u.availableVersion}`;
+        badgeColor = 'blue';
+      } else if (u.phase === 'error') {
+        badgeText = '检查失败'; badgeColor = 'red';
+        detailText = u.lastError || '';
+      } else if (u.phase === 'idle') {
+        badgeText = enMode ? `v${u.currentVersion || m.version}` : `当前 v${u.currentVersion || m.version}`;
+        badgeColor = '';
+      }
+      const busy = u.phase === 'checking' || u.phase === 'downloading' || u.phase === 'applying';
+      const primaryAction = u.canInstallNow
+        ? `<button class="button primary" data-action="apply-update" ${u.phase==='applying'?'disabled':''}>立即重启更新</button>`
+        : u.phase === 'update_available'
+          ? `<button class="button primary" data-action="download-update">下载并更新</button>`
+          : '';
+      const notesBtn = u.notesUrl ? `<button class="button ghost" data-action="open-update-notes">查看更新日志</button>` : '';
+      return `<div class="section-title"><h2>软件更新</h2></div>
+        <article class="card general-card">
+          <div class="general-row">
+            <span class="round-icon ${badgeColor==='green'?'green':''}">${svg('refresh','large')}</span>
+            <div class="setting-label">
+              <div class="row" style="gap:10px;justify-content:flex-start;flex-wrap:wrap"><h3>自动更新策略</h3>${chip(badgeText, badgeColor)}</div>
+              <span class="muted">${modeDesc}</span>
+              ${detailText ? `<span class="muted small"${u.phase==='error'?' style="color:var(--red)"':''}>${escapeHtml(detailText)}</span>` : ''}
+              <span class="subtle small">仅从公开更新源读取静态版本清单，不上传任何设备或使用信息。</span>
+            </div>
+            <div class="general-actions">
+              <select class="select" id="auto-update-mode" aria-label="软件更新">
+                <option value="silent" ${u.mode==='silent'?'selected':''}>自动静默更新</option>
+                <option value="notify" ${u.mode==='notify'?'selected':''}>仅提醒我</option>
+                <option value="disabled" ${u.mode==='disabled'?'selected':''}>关闭自动检查</option>
+              </select>
+              ${primaryAction}
+              <button class="button" data-action="check-updates" ${busy||!u.configured?'disabled':''}>${u.phase==='checking'?'正在检查…':'立即检查更新'}</button>
+              ${notesBtn}
+            </div>
+          </div>
+        </article>`;
+    }
+
     function renderGeneral() {
       const m = currentModel(), c = m.cross;
       return `<div class="general-page">${heading('常规', '管理启动方式、后台运行与诊断')}
         <article class="card general-row"><span class="round-icon green">${svg('monitor','large')}</span><div class="setting-label"><h2>${m.language==='en'?'Screenshot':'截图'}</h2><span class="muted">${m.language==='en'?'Capture on the computer you are controlling. Done copies the image to the shared clipboard.':'在当前控制的电脑截图，完成后图片进入共享剪贴板。'}</span>${m.screenshotError?`<span class="muted" style="color:var(--red)">${escapeHtml(m.screenshotError)}</span>`:''}<span class="muted small">${m.language==='en'?'Click the field and press a shortcut, then save. Use the same shortcut on each computer.':'点击输入框按下新组合后保存；各台电脑请使用相同的截图快捷键。'}</span></div><div class="general-actions"><input class="select" id="screenshot-shortcut" style="width:180px" value="${escapeHtml(m.screenshotShortcut||'Alt+X')}" aria-label="Screenshot shortcut"><button class="button" data-action="screenshot-hotkey-save">${m.language==='en'?'Save shortcut':'保存快捷键'}</button><button class="button" data-action="screenshot">${m.language==='en'?'Capture':'开始截图'}</button></div></article>
         <article class="card general-card"><div class="general-row"><span class="round-icon">${svg('globe','large')}</span><div class="setting-label"><h2>界面语言</h2><span class="muted">首次安装默认使用 English，可随时切换为简体中文</span></div><select class="select language-select" id="ui-language" aria-label="界面语言"><option value="en" ${m.language==='en'?'selected':''}>English</option><option value="zh-CN" ${m.language==='zh-CN'?'selected':''}>简体中文</option></select></div><div class="general-row"><span class="round-icon">${svg('type','large')}</span><div class="setting-label"><h2>界面字体大小</h2><span class="muted">调整设置中心的文字与控件比例</span></div><div class="font-scale-control"><input id="font-scale" type="range" min="50" max="125" step="5" value="${clamp(m.fontScale || 100,50,125)}" aria-label="界面字体大小"><output id="font-scale-output">${clamp(m.fontScale || 100,50,125)}%</output></div></div><div class="general-row"><span class="round-icon">${svg('monitor','large')}</span><div class="setting-label"><h2>随 Windows 启动</h2><span class="muted">${m.autostartState === 'stale' ? '启动配置需要修复：请以管理员身份重新开启此选项' : '当前用户登录后自动启动；管理员模式使用登录计划任务'}</span></div>${switchButton(m.autostart,'toggle-autostart','随 Windows 启动')}</div><div class="general-row"><span class="round-icon green">${svg('tray','large')}</span><div class="setting-label"><h2>后台运行</h2><span class="muted">Pierdesk 正常驻留在系统托盘；关闭设置窗口不会退出程序</span></div>${chip('正在运行','green')}</div><div class="background-flow"><div class="flow-item">${svg('settings','large')}<span>关闭设置窗口</span></div><span class="flow-arrow">→</span><div class="flow-item">${svg('tray','large')}<span>系统托盘图标保持运行</span></div><span class="flow-arrow">→</span><div class="flow-item">${svg('clipboard','large')}<span>剪贴板与跨屏服务继续工作</span></div></div></article>
+        ${renderUpdateSection(m)}
         <div class="section-title"><h2>权限与兼容性</h2></div><article class="card general-compat"><div class="general-compat-grid"><div class="compat-identity"><span class="round-icon ${c.admin?'green':''}">${svg('shield','large')}</span><div class="setting-label"><strong>当前进程权限：${c.admin?'管理员权限':'普通权限'}</strong><span class="muted small">${c.admin?'当前后台实例已提权':'兼容性选项不会提升已经运行的旧实例'}</span><button class="button" data-action="restart-admin" ${c.admin?'disabled':''}>${svg('shield')}${c.admin?'已以管理员身份运行':'替换为管理员实例'}</button></div></div><ul class="compat-notes"><li>${svg('info')}<span>普通权限无法控制管理员窗口</span></li><li>${svg('info')}<span>管理员权限仍无法控制 UAC 安全桌面、登录界面或 Ctrl+Alt+Del</span></li><li>${svg('info')}<span>游戏、反作弊程序、Raw Input、独占全屏和远程桌面不在兼容优化范围</span></li></ul><button class="button ghost" data-action="compatibility">查看完整兼容性说明${svg('chevron')}</button></div></article>
         <div class="section-title"><h2>诊断</h2></div><article class="card general-row"><span class="round-icon">${svg('log','large')}</span><div class="setting-label"><h3>诊断日志</h3><span class="muted">记录设备发现、连接、剪贴板与传输状态，不写入配对密钥和传输凭据</span><span class="mono subtle small">${escapeHtml(m.logPath)}</span></div><div class="general-actions"><button class="button" data-action="open-log">打开诊断日志</button><button class="button" data-action="open-log-folder">打开日志文件夹</button></div></article>
         <div class="section-title"><h2>退出程序</h2></div><article class="card general-row danger-card"><span class="round-icon" style="color:var(--red);background:var(--red-soft)">${svg('power','large')}</span><div class="setting-label"><h3>退出 Pierdesk</h3><span class="muted">停止跨屏控制、剪贴板同步和正在运行的传输服务</span><span class="subtle small">退出前会安全释放跨屏输入状态</span></div><button class="button danger" data-confirm="exit">退出 Pierdesk</button></article></div>`;
@@ -1374,6 +1538,16 @@
     function rememberScroll() {
       const content = document.querySelector('.content');
       if (content && state.scrollResetPage !== state.page) state.scrollByPage[state.page] = content.scrollTop;
+      const sidebar = document.querySelector('.sidebar');
+      if (sidebar) state.sidebarScrollTop = sidebar.scrollTop;
+    }
+    function markScrolling() {
+      state.scrolling = true;
+      clearTimeout(state.scrollTimer);
+      state.scrollTimer = setTimeout(() => {
+        state.scrolling = false;
+        flushDeferredModel();
+      }, 200);
     }
     function hasActiveTextSelection() {
       const selection = window.getSelection?.();
@@ -1383,7 +1557,7 @@
     function hasEditableFocus() { return document.activeElement?.matches('input,select,textarea,[contenteditable="true"]') === true; }
     function shouldDeferModelRender() {
       const liveSshModal = state.modal && ['ssh-local','ssh-waiting'].includes(state.modal.type);
-      return state.interacting || hasEditableFocus() || hasActiveTextSelection() || Boolean(state.modal && !liveSshModal);
+      return state.interacting || state.scrolling || hasEditableFocus() || hasActiveTextSelection() || Boolean(state.modal && !liveSshModal);
     }
     function flushDeferredModel() {
       if (!state.modelDirty || shouldDeferModelRender()) return;
@@ -1395,7 +1569,11 @@
       state.modelDirty = false;
       if (!visiblePages().some(([key]) => key === state.page)) state.page = 'status';
       const renderer = { status:renderStatus, devices:renderDevices, cross:renderCross, clipboard:renderClipboard, transfer:renderTransfer, connection:renderConnection, general:renderGeneral, license:renderLicense, support:renderSupport, about:renderAbout, remote:renderRemote }[state.page] || renderStatus;
-      document.getElementById('root').innerHTML = shell(renderer());
+      const root = ensureShell();
+      syncTopbar(root);
+      syncSidebar(root);
+      const content = root.querySelector('.content');
+      if (content) content.innerHTML = `<section class="page">${sshNotice()}${renderer()}</section>`;
       const fontScale = document.getElementById('font-scale');
       if (fontScale) {
         const value = clamp(currentModel().fontScale || 100, 50, 125);
@@ -1404,8 +1582,18 @@
         document.getElementById('font-scale-output').textContent = `${value}%`;
       }
       applyAppearance();
-      localizeDocument();
-      const content = document.querySelector('.content');
+      localizeDocument(content);
+      const modalHost = document.getElementById('modal-host');
+      const modalHtml = state.modal ? renderModal(state.modal) : '';
+      const modalSignature = `${currentModel().language || 'en'}|${modalHtml}`;
+      const hadModal = Boolean(modalHost?.firstElementChild);
+      if (modalHost && state.modalHtml !== modalSignature) {
+        state.modalHtml = modalSignature;
+        modalHost.innerHTML = modalHtml;
+        localizeNode(modalHost);
+        const modalButton = modalHost.querySelector('.modal button');
+        if (state.modal && !hadModal && modalButton) modalButton.focus();
+      }
       if (content) {
         if (state.scrollResetPage === state.page) {
           state.scrollByPage[state.page] = 0;
@@ -1413,8 +1601,8 @@
           state.scrollResetPage = '';
         } else content.scrollTop = state.scrollByPage[state.page] || 0;
       }
-      const modalButton = document.querySelector('.modal button');
-      if (state.modal && modalButton) modalButton.focus();
+      const sidebar = root.querySelector('.sidebar');
+      if (sidebar && sidebar.scrollTop !== state.sidebarScrollTop) sidebar.scrollTop = state.sidebarScrollTop;
     }
 
     function send(message) {
@@ -1539,8 +1727,17 @@
     });
     document.addEventListener('focusout', () => setTimeout(flushDeferredModel, 120), true);
     document.addEventListener('scroll', event => {
-      if (event.target.classList?.contains('content')) state.scrollByPage[state.page] = event.target.scrollTop;
+      if (event.target.classList?.contains('content')) {
+        state.scrollByPage[state.page] = event.target.scrollTop;
+        markScrolling();
+      } else if (event.target.classList?.contains('sidebar')) {
+        state.sidebarScrollTop = event.target.scrollTop;
+        markScrolling();
+      }
     }, true);
+    document.addEventListener('wheel', event => {
+      if (event.target.closest?.('.sidebar, .content')) markScrolling();
+    }, { capture: true, passive: true });
 
     document.addEventListener('click', event => {
       const page = event.target.closest('[data-page]')?.dataset.page;
@@ -1621,6 +1818,10 @@
       else if (action === 'screenshot-hotkey-save') send({action:'set-screenshot-shortcut',shortcut:document.getElementById('screenshot-shortcut').value.trim()});
       else if (action === 'toggle-auto-popup') send({action:'set-auto-popup',enabled:!m.transfer.autoPopup});
       else if (action === 'toggle-autostart') send({action:'set-autostart',enabled:!m.autostart});
+      else if (action === 'check-updates') send({action:'check-updates'});
+      else if (action === 'download-update') send({action:'download-update'});
+      else if (action === 'apply-update') send({action:'apply-update'});
+      else if (action === 'open-update-notes') send({action:'open-update-notes'});
       else if (action === 'toggle-theme') {
         m.theme = m.theme === 'dark' ? 'light' : 'dark';
         applyAppearance();
@@ -1670,6 +1871,12 @@
         send({action:'set-corner-pixels',pixels});
       }
       if (event.target.id === 'ui-language') { currentModel().language = event.target.value; send({action:'set-language',language:event.target.value}); render(); }
+      if (event.target.id === 'auto-update-mode') {
+        const mode = event.target.value;
+        if (currentModel().autoUpdate) currentModel().autoUpdate.mode = mode;
+        send({action:'set-auto-update-mode',mode});
+        render();
+      }
       if (event.target.id === 'font-scale') {
         const value = Math.round(clamp(event.target.value,50,125) / 5) * 5;
         currentModel().fontScale = value;

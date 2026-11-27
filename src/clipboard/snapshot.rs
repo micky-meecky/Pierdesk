@@ -74,6 +74,10 @@ impl SharedFormatKind {
         }
     }
 
+    pub(crate) const fn is_image(self) -> bool {
+        matches!(self, Self::Png | Self::DibV5 | Self::Dib)
+    }
+
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::UnicodeText => "文字",

@@ -748,12 +748,13 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pierdesk"
-version = "1.0.53"
+version = "1.0.65"
 dependencies = [
  "base64",
  "clipferry-license-protocol",
  "getrandom 0.3.4",
  "rcgen",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

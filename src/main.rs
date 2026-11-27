@@ -41,6 +41,7 @@ fn main() -> ExitCode {
                 "tray"
                     | "tray-replace"
                     | "update-apply"
+                    | "self-update-apply"
                     | "file-drag-edge-helper"
                     | "file-drag-edge-launcher"
                     | "screenshot-helper"
@@ -116,6 +117,19 @@ fn run() -> Result<(), String> {
     }
     if command == "update-apply" {
         return pierdesk::update_support::run_apply(arguments.collect());
+    }
+    if command == "self-update-apply" {
+        let collected: Vec<String> = arguments.collect();
+        return pierdesk::auto_update_apply::run_cli(&collected);
+    }
+    if command == "update-keygen" {
+        return run_update_keygen(arguments);
+    }
+    if command == "update-sign-manifest" {
+        return run_update_sign_manifest(arguments);
+    }
+    if command == "update-verify-manifest" {
+        return run_update_verify_manifest(arguments);
     }
     if command == "screenshot-helper" {
         let language = arguments.next().unwrap_or_else(|| "en".into());
@@ -239,8 +253,7 @@ fn run() -> Result<(), String> {
         "ssh-keygen-self-test" => {
             reject_remaining_arguments(&mut arguments, "ssh-keygen-self-test")?;
             let askpass = std::env::current_exe().map_err(|error| error.to_string())?;
-            pierdesk::ssh::keygen_askpass_self_test(&askpass)
-                .map_err(|error| error.to_string())?;
+            pierdesk::ssh::keygen_askpass_self_test(&askpass).map_err(|error| error.to_string())?;
             println!("ssh-keygen self-test passed");
             Ok(())
         }
@@ -942,7 +955,9 @@ fn wizard_english() -> bool {
         DeviceStore::current_user()
             .ok()
             .and_then(|store| pierdesk::app_settings::UiPreferences::load_or_default(&store).ok())
-            .is_none_or(|preferences| preferences.language == pierdesk::app_settings::UiLanguage::English)
+            .is_none_or(|preferences| {
+                preferences.language == pierdesk::app_settings::UiLanguage::English
+            })
     })
 }
 
@@ -958,7 +973,10 @@ fn run_pair_wizard() -> Result<(), String> {
     if let Err(error) = &result {
         eprintln!("\n{}{error}", tr!("配对失败：", "Pairing failed: "));
     }
-    wait_for_enter(tr!("\n按 Enter 关闭此窗口...", "\nPress Enter to close this window..."))?;
+    wait_for_enter(tr!(
+        "\n按 Enter 关闭此窗口...",
+        "\nPress Enter to close this window..."
+    ))?;
     result
 }
 
@@ -969,15 +987,37 @@ fn run_pair_wizard_inner() -> Result<(), String> {
         .load_or_create_identity()
         .map_err(|error| format!("device identity initialization failed: {error}"))?;
     println!("{}", tr!("Pierdesk 设备配对", "Pierdesk device pairing"));
-    println!("{}{}", tr!("本机指纹：", "Local fingerprint: "), stored.identity.fingerprint());
-    println!("{}", tr!("\n两台电脑分别打开此向导：一端选择 1，另一端选择 2。", "\nOpen this wizard on both computers: choose 1 on one and 2 on the other."));
-    println!("{}", tr!("核对两端出现的 verify_code 完全一致后，必须输入大写 YES。\n", "Check that the verify_code on both computers is identical, then type YES in capitals.\n"));
+    println!(
+        "{}{}",
+        tr!("本机指纹：", "Local fingerprint: "),
+        stored.identity.fingerprint()
+    );
+    println!(
+        "{}",
+        tr!(
+            "\n两台电脑分别打开此向导：一端选择 1，另一端选择 2。",
+            "\nOpen this wizard on both computers: choose 1 on one and 2 on the other."
+        )
+    );
+    println!(
+        "{}",
+        tr!(
+            "核对两端出现的 verify_code 完全一致后，必须输入大写 YES。\n",
+            "Check that the verify_code on both computers is identical, then type YES in capitals.\n"
+        )
+    );
     println!("{}", tr!("[1] 监听配对", "[1] Listen for pairing"));
     println!("{}", tr!("[2] 连接配对", "[2] Connect to pair"));
     let role = prompt(tr!("请选择 1 或 2: ", "Choose 1 or 2: "))?;
     let address_text = match role.as_str() {
-        "1" => prompt(tr!("本机监听地址（例如 192.168.1.29:45232）: ", "Address to listen on (for example 192.168.1.29:45232): "))?,
-        "2" => prompt(tr!("对端地址（例如 192.168.1.29:45232）: ", "Address of the other computer (for example 192.168.1.29:45232): "))?,
+        "1" => prompt(tr!(
+            "本机监听地址（例如 192.168.1.29:45232）: ",
+            "Address to listen on (for example 192.168.1.29:45232): "
+        ))?,
+        "2" => prompt(tr!(
+            "对端地址（例如 192.168.1.29:45232）: ",
+            "Address of the other computer (for example 192.168.1.29:45232): "
+        ))?,
         _ => return Err(tr!("只能选择 1 或 2", "Choose only 1 or 2").to_owned()),
     };
     let mut address_argument = std::iter::once(address_text);
@@ -987,16 +1027,29 @@ fn run_pair_wizard_inner() -> Result<(), String> {
     } else {
         tr!("主机", "Host")
     };
-    let label = prompt(&format!("{} [{default_label}]: ", tr!("给对端起一个名称", "Name for the other computer")))?;
+    let label = prompt(&format!(
+        "{} [{default_label}]: ",
+        tr!("给对端起一个名称", "Name for the other computer")
+    ))?;
     let label = if label.is_empty() {
         default_label.to_owned()
     } else {
         label
     };
     if label.len() > 128 || label.chars().any(char::is_control) {
-        return Err(tr!("设备名称必须为 1 到 128 个 UTF-8 字节且不能包含控制字符", "The device name must be 1 to 128 UTF-8 bytes and contain no control characters").to_owned());
+        return Err(tr!(
+            "设备名称必须为 1 到 128 个 UTF-8 字节且不能包含控制字符",
+            "The device name must be 1 to 128 UTF-8 bytes and contain no control characters"
+        )
+        .to_owned());
     }
-    println!("{}", tr!("\n正在建立配对，请保持两端窗口打开...", "\nEstablishing the pairing. Keep the windows on both computers open..."));
+    println!(
+        "{}",
+        tr!(
+            "\n正在建立配对，请保持两端窗口打开...",
+            "\nEstablishing the pairing. Keep the windows on both computers open..."
+        )
+    );
     let pending = if role == "1" {
         listen_for_pairing(store, address, Duration::from_mins(2))
             .map_err(|error| format!("pairing listener failed: {error}"))?
@@ -1010,9 +1063,15 @@ fn run_pair_wizard_inner() -> Result<(), String> {
 fn run_trust_wizard() -> Result<(), String> {
     let result = run_trust_wizard_inner();
     if let Err(error) = &result {
-        eprintln!("\n{}{error}", tr!("设备管理失败：", "Device management failed: "));
+        eprintln!(
+            "\n{}{error}",
+            tr!("设备管理失败：", "Device management failed: ")
+        );
     }
-    wait_for_enter(tr!("\n按 Enter 关闭此窗口...", "\nPress Enter to close this window..."))?;
+    wait_for_enter(tr!(
+        "\n按 Enter 关闭此窗口...",
+        "\nPress Enter to close this window..."
+    ))?;
     result
 }
 
@@ -1022,27 +1081,52 @@ fn run_trust_wizard_inner() -> Result<(), String> {
     let peers = store
         .list_peers()
         .map_err(|error| format!("trust list failed: {error}"))?;
-    println!("{}", tr!("Pierdesk 已配对设备\n", "Pierdesk paired devices\n"));
+    println!(
+        "{}",
+        tr!("Pierdesk 已配对设备\n", "Pierdesk paired devices\n")
+    );
     if peers.is_empty() {
-        println!("{}", tr!("当前没有已配对设备。", "There are no paired devices."));
+        println!(
+            "{}",
+            tr!("当前没有已配对设备。", "There are no paired devices.")
+        );
         return Ok(());
     }
     for (index, peer) in peers.iter().enumerate() {
         println!("[{}] {}\n    {}", index + 1, peer.label, peer.fingerprint);
     }
-    println!("{}", tr!("[0] 仅查看，不做修改", "[0] View only, make no changes"));
-    let selection = prompt(tr!("\n输入要取消配对的编号: ", "\nEnter the number of the device to unpair: "))?
-        .parse::<usize>()
-        .map_err(|_| tr!("请输入列表中的数字", "Enter a number from the list").to_owned())?;
+    println!(
+        "{}",
+        tr!("[0] 仅查看，不做修改", "[0] View only, make no changes")
+    );
+    let selection = prompt(tr!(
+        "\n输入要取消配对的编号: ",
+        "\nEnter the number of the device to unpair: "
+    ))?
+    .parse::<usize>()
+    .map_err(|_| tr!("请输入列表中的数字", "Enter a number from the list").to_owned())?;
     if selection == 0 {
         return Ok(());
     }
     let peer = peers
         .get(selection.saturating_sub(1))
         .ok_or_else(|| tr!("设备编号超出范围", "Device number out of range").to_owned())?;
-    println!("\n{}{} ({})", tr!("即将取消配对：", "About to unpair: "), peer.label, peer.fingerprint);
-    if prompt(tr!("输入大写 REVOKE 确认: ", "Type REVOKE in capitals to confirm: "))? != "REVOKE" {
-        return Err(tr!("未输入大写 REVOKE，没有修改信任列表", "REVOKE was not typed in capitals; the trust list was not changed").to_owned());
+    println!(
+        "\n{}{} ({})",
+        tr!("即将取消配对：", "About to unpair: "),
+        peer.label,
+        peer.fingerprint
+    );
+    if prompt(tr!(
+        "输入大写 REVOKE 确认: ",
+        "Type REVOKE in capitals to confirm: "
+    ))? != "REVOKE"
+    {
+        return Err(tr!(
+            "未输入大写 REVOKE，没有修改信任列表",
+            "REVOKE was not typed in capitals; the trust list was not changed"
+        )
+        .to_owned());
     }
     store
         .revoke_peer(peer.fingerprint)
@@ -1055,9 +1139,15 @@ fn run_trust_wizard_inner() -> Result<(), String> {
 fn run_settings_wizard() -> Result<(), String> {
     let result = run_settings_wizard_inner();
     if let Err(error) = &result {
-        eprintln!("\n{}{error}", tr!("连接设置失败：", "Connection settings failed: "));
+        eprintln!(
+            "\n{}{error}",
+            tr!("连接设置失败：", "Connection settings failed: ")
+        );
     }
-    wait_for_enter(tr!("\n按 Enter 关闭此窗口...", "\nPress Enter to close this window..."))?;
+    wait_for_enter(tr!(
+        "\n按 Enter 关闭此窗口...",
+        "\nPress Enter to close this window..."
+    ))?;
     result
 }
 
@@ -1072,12 +1162,32 @@ fn run_settings_wizard_inner() -> Result<(), String> {
         .list_peers()
         .map_err(|error| format!("trust list failed: {error}"))?;
     if peers.is_empty() {
-        return Err(tr!("当前没有已配对设备，请先从托盘选择“配对新设备”", "There are no paired devices yet. Choose “Pair new device…” from the tray menu first").to_owned());
+        return Err(tr!(
+            "当前没有已配对设备，请先从托盘选择“配对新设备”",
+            "There are no paired devices yet. Choose “Pair new device…” from the tray menu first"
+        )
+        .to_owned());
     }
     let previous = AppSettings::load(&store).ok();
-    println!("{}", tr!("Pierdesk 局域网连接设置\n", "Pierdesk LAN connection settings\n"));
-    println!("{}{}", tr!("本机指纹：", "Local fingerprint: "), identity.identity.fingerprint());
-    println!("{}", tr!("请选择唯一的活动目标设备：", "Choose the single active target device:"));
+    println!(
+        "{}",
+        tr!(
+            "Pierdesk 局域网连接设置\n",
+            "Pierdesk LAN connection settings\n"
+        )
+    );
+    println!(
+        "{}{}",
+        tr!("本机指纹：", "Local fingerprint: "),
+        identity.identity.fingerprint()
+    );
+    println!(
+        "{}",
+        tr!(
+            "请选择唯一的活动目标设备：",
+            "Choose the single active target device:"
+        )
+    );
     for (index, peer) in peers.iter().enumerate() {
         let marker = if previous
             .as_ref()
@@ -1103,27 +1213,46 @@ fn run_settings_wizard_inner() -> Result<(), String> {
                 .position(|peer| peer.fingerprint == settings.active_peer)
         })
         .map_or(1, |index| index + 1);
-    let selection = prompt_with_default(tr!("设备编号", "Device number"), &default_selection.to_string())?
-        .parse::<usize>()
-        .map_err(|_| tr!("设备编号必须是数字", "The device number must be a number").to_owned())?;
+    let selection = prompt_with_default(
+        tr!("设备编号", "Device number"),
+        &default_selection.to_string(),
+    )?
+    .parse::<usize>()
+    .map_err(|_| tr!("设备编号必须是数字", "The device number must be a number").to_owned())?;
     let peer = peers
         .get(selection.saturating_sub(1))
         .ok_or_else(|| tr!("设备编号超出范围", "Device number out of range").to_owned())?;
 
-    println!("{}", tr!("\n每台电脑需要一个固定服务地址，建议端口 45233。", "\nEach computer needs a fixed service address; port 45233 is recommended."));
-    println!("{}", tr!("本机地址填写本机真实局域网 IPv4；对端地址填写另一台电脑的地址。", "Enter this computer's real LAN IPv4 address as the local address, and the other computer's address as the peer address."));
+    println!(
+        "{}",
+        tr!(
+            "\n每台电脑需要一个固定服务地址，建议端口 45233。",
+            "\nEach computer needs a fixed service address; port 45233 is recommended."
+        )
+    );
+    println!(
+        "{}",
+        tr!(
+            "本机地址填写本机真实局域网 IPv4；对端地址填写另一台电脑的地址。",
+            "Enter this computer's real LAN IPv4 address as the local address, and the other computer's address as the peer address."
+        )
+    );
     let local_default = previous.as_ref().map_or_else(
         || "192.168.1.2:45233".to_owned(),
         |value| value.local_endpoint.to_string(),
     );
-    let local_text = prompt_with_default(tr!("本机服务地址", "Local service address"), &local_default)?;
-    let local_endpoint = parse_private_socket_text(&local_text, tr!("本机服务地址", "Local service address"))?;
+    let local_text =
+        prompt_with_default(tr!("本机服务地址", "Local service address"), &local_default)?;
+    let local_endpoint =
+        parse_private_socket_text(&local_text, tr!("本机服务地址", "Local service address"))?;
     let peer_default = previous.as_ref().map_or_else(
         || "192.168.1.3:45233".to_owned(),
         |value| value.peer_endpoint.to_string(),
     );
-    let peer_text = prompt_with_default(tr!("对端服务地址", "Peer service address"), &peer_default)?;
-    let peer_endpoint = parse_private_socket_text(&peer_text, tr!("对端服务地址", "Peer service address"))?;
+    let peer_text =
+        prompt_with_default(tr!("对端服务地址", "Peer service address"), &peer_default)?;
+    let peer_endpoint =
+        parse_private_socket_text(&peer_text, tr!("对端服务地址", "Peer service address"))?;
     let auto_default = if previous.as_ref().is_some_and(|value| value.auto_receive) {
         "YES"
     } else {
@@ -2146,8 +2275,8 @@ fn run_license_command(
 ) -> Result<(), String> {
     let root = arguments.next().ok_or("license store directory required")?;
     let issuer = arguments.next().ok_or("issuer public key required")?;
-    let client = pierdesk::licensing::LicenseClient::new(root, issuer)
-        .map_err(|error| error.to_string())?;
+    let client =
+        pierdesk::licensing::LicenseClient::new(root, issuer).map_err(|error| error.to_string())?;
     match command {
         "license-device" => {
             reject_remaining_arguments(arguments, command)?;
@@ -2204,5 +2333,165 @@ fn run_license_command(
         }
         _ => return Err("unknown license command".to_owned()),
     }
+    Ok(())
+}
+
+fn run_update_keygen(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut output_path: Option<std::path::PathBuf> = None;
+    let mut force = false;
+    while let Some(arg) = arguments.next() {
+        match arg.as_str() {
+            "--output" => {
+                output_path = Some(std::path::PathBuf::from(
+                    arguments.next().ok_or("--output requires a path")?,
+                ));
+            }
+            "--force" => force = true,
+            _ => return Err(format!("unknown update-keygen argument: {arg}")),
+        }
+    }
+    let output_path = output_path.ok_or("update-keygen requires --output <private-key-path>")?;
+    if output_path.exists() && !force {
+        return Err(format!(
+            "refusing to overwrite existing signing key {}; pass --force to replace",
+            output_path.display()
+        ));
+    }
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let (pkcs8, public_key_b64) =
+        pierdesk::auto_update::generate_signing_keypair().map_err(|error| error.to_string())?;
+    std::fs::write(&output_path, pkcs8).map_err(|error| error.to_string())?;
+    println!("PRIVATE_KEY={}", output_path.display());
+    println!("PUBLIC_KEY={public_key_b64}");
+    Ok(())
+}
+
+fn run_update_sign_manifest(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut key_path: Option<std::path::PathBuf> = None;
+    let mut exe_path: Option<std::path::PathBuf> = None;
+    let mut version: Option<String> = None;
+    let mut published_at: Option<String> = None;
+    let mut download_urls: Vec<String> = Vec::new();
+    let mut notes_url: Option<String> = None;
+    let mut output_path: Option<std::path::PathBuf> = None;
+    let mut allow_http_loopback = false;
+
+    while let Some(arg) = arguments.next() {
+        match arg.as_str() {
+            "--key" => {
+                key_path = Some(std::path::PathBuf::from(
+                    arguments.next().ok_or("--key requires a path")?,
+                ));
+            }
+            "--exe" => {
+                exe_path = Some(std::path::PathBuf::from(
+                    arguments.next().ok_or("--exe requires a path")?,
+                ));
+            }
+            "--version" => {
+                version = Some(arguments.next().ok_or("--version requires a value")?);
+            }
+            "--published-at" => {
+                published_at = Some(arguments.next().ok_or("--published-at requires a value")?);
+            }
+            "--url" => {
+                download_urls.push(arguments.next().ok_or("--url requires a URL")?);
+            }
+            "--notes-url" => {
+                notes_url = Some(arguments.next().ok_or("--notes-url requires a URL")?);
+            }
+            "--output" => {
+                output_path = Some(std::path::PathBuf::from(
+                    arguments.next().ok_or("--output requires a path")?,
+                ));
+            }
+            "--allow-http-loopback" => allow_http_loopback = true,
+            _ => return Err(format!("unknown update-sign-manifest argument: {arg}")),
+        }
+    }
+
+    let key_path = key_path.ok_or("update-sign-manifest requires --key <pk8>")?;
+    let exe_path = exe_path.ok_or("update-sign-manifest requires --exe <path>")?;
+    let version = version.ok_or("update-sign-manifest requires --version <X.Y.Z>")?;
+    let output_path = output_path.ok_or("update-sign-manifest requires --output <json>")?;
+    if download_urls.is_empty() {
+        return Err("update-sign-manifest requires at least one --url <https://...>".into());
+    }
+
+    let pkcs8 = std::fs::read(&key_path).map_err(|error| error.to_string())?;
+    let public_key_b64 =
+        pierdesk::auto_update::public_key_from_pkcs8(&pkcs8).map_err(|error| error.to_string())?;
+    let (sha256, size) =
+        pierdesk::auto_update::hash_file_sha256(&exe_path).map_err(|error| error.to_string())?;
+    let published_at =
+        published_at.unwrap_or_else(|| format!("unix:{}", pierdesk::auto_update::now_unix_secs()));
+    let manifest = pierdesk::auto_update::UpdateManifest {
+        schema_version: pierdesk::auto_update::MANIFEST_SCHEMA_VERSION,
+        channel: pierdesk::auto_update::DEFAULT_CHANNEL.to_owned(),
+        version: version.clone(),
+        published_at,
+        file_name: pierdesk::auto_update::EXPECTED_FILE_NAME.to_owned(),
+        size,
+        sha256: sha256.clone(),
+        download_urls,
+        notes_url,
+    };
+    let signed = pierdesk::auto_update::sign_manifest(&manifest, &pkcs8, allow_http_loopback)
+        .map_err(|error| error.to_string())?;
+    // Self-verify before writing to disk.
+    pierdesk::auto_update::verify_signed_manifest(&signed, &public_key_b64, allow_http_loopback, 1)
+        .map_err(|error| error.to_string())?;
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&signed).map_err(|error| error.to_string())?;
+    std::fs::write(&output_path, json).map_err(|error| error.to_string())?;
+    println!("MANIFEST={}", output_path.display());
+    println!("VERSION={version}");
+    println!("SIZE={size}");
+    println!("SHA256={sha256}");
+    println!("PUBLIC_KEY={public_key_b64}");
+    Ok(())
+}
+
+fn run_update_verify_manifest(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut manifest_path: Option<std::path::PathBuf> = None;
+    let mut public_key: Option<String> = None;
+    let mut allow_http_loopback = false;
+    while let Some(arg) = arguments.next() {
+        match arg.as_str() {
+            "--manifest" => {
+                manifest_path = Some(std::path::PathBuf::from(
+                    arguments.next().ok_or("--manifest requires a path")?,
+                ));
+            }
+            "--public-key" => {
+                public_key = Some(arguments.next().ok_or("--public-key requires a value")?);
+            }
+            "--allow-http-loopback" => allow_http_loopback = true,
+            _ => return Err(format!("unknown update-verify-manifest argument: {arg}")),
+        }
+    }
+    let manifest_path = manifest_path.ok_or("update-verify-manifest requires --manifest <json>")?;
+    let public_key = public_key.ok_or("update-verify-manifest requires --public-key <base64>")?;
+    let bytes = std::fs::read(&manifest_path).map_err(|error| error.to_string())?;
+    let signed: pierdesk::auto_update::SignedUpdateManifest =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let verified =
+        pierdesk::auto_update::verify_signed_manifest(&signed, &public_key, allow_http_loopback, 1)
+            .map_err(|error| error.to_string())?;
+    println!(
+        "VERIFIED version={} size={} sha256={} urls={}",
+        verified.version,
+        verified.size,
+        verified.sha256,
+        verified.download_urls.len()
+    );
     Ok(())
 }

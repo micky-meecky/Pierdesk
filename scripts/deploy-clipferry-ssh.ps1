@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    $ExePath = Join-Path $PSScriptRoot '..\dist\pierdesk.exe'
+    $ExePath = Join-Path $PSScriptRoot '..\dist\clipferry.exe'
 }
 if ([string]::IsNullOrWhiteSpace($TargetsPath)) {
     $TargetsPath = Join-Path $PSScriptRoot 'clipferry-deploy-targets.local.psd1'
@@ -103,8 +103,8 @@ $TargetsPath = [System.IO.Path]::GetFullPath($TargetsPath)
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     throw "Executable was not found: $ExePath"
 }
-if ((Split-Path -Leaf $ExePath) -cne 'pierdesk.exe') {
-    throw "The deployment artifact must be named exactly pierdesk.exe: $ExePath"
+if ((Split-Path -Leaf $ExePath) -cne 'clipferry.exe') {
+    throw "The deployment artifact must be named exactly clipferry.exe: $ExePath"
 }
 if (-not (Test-Path -LiteralPath $TargetsPath -PathType Leaf)) {
     throw "Deployment target file was not found: $TargetsPath"

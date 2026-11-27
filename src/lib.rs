@@ -1,5 +1,7 @@
 pub mod about;
 pub mod app_settings;
+pub mod auto_update;
+pub mod auto_update_apply;
 mod autostart;
 pub mod clipboard;
 mod corner_guard_window;

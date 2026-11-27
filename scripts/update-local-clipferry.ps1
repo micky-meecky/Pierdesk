@@ -30,7 +30,7 @@ trap {
 }
 
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    $ExePath = Join-Path $PSScriptRoot '..\dist\pierdesk.exe'
+    $ExePath = Join-Path $PSScriptRoot '..\dist\clipferry.exe'
 }
 
 function Test-IsAdministrator {
@@ -48,8 +48,8 @@ $ExePath = [System.IO.Path]::GetFullPath($ExePath)
 if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     throw "Executable was not found: $ExePath"
 }
-if ((Split-Path -Leaf $ExePath) -cne 'pierdesk.exe') {
-    throw "The deployment artifact must be named exactly pierdesk.exe: $ExePath"
+if ((Split-Path -Leaf $ExePath) -cne 'clipferry.exe') {
+    throw "The deployment artifact must be named exactly clipferry.exe: $ExePath"
 }
 
 if (-not (Test-IsAdministrator)) {

@@ -964,6 +964,11 @@ fn reconcile_drag_worker(
     reconnect_deadline: Option<Instant>,
     now: Instant,
 ) -> DragWorkerReconciliation {
+    // A live transport does not imply its OLE worker is alive. Startup/IPC failures must
+    // recreate the worker even if the peer channel generation has not changed.
+    if stopped {
+        return DragWorkerReconciliation::Drop;
+    }
     if connected_generation == Some(worker_generation) {
         return DragWorkerReconciliation::Keep;
     }
@@ -1000,14 +1005,17 @@ const fn drag_boundary_visible(
     }
 }
 
-/// A controlled peer's boundary window only appears once the press has moved, so a plain
-/// remote click on the taskbar cannot reveal the topmost receiver. A retained real drag keeps
-/// it immediately, because its return path must already be ready.
+/// Both local and controlled-peer boundary windows only appear once the press has moved,
+/// so plain clicks on the desktop, apps, or taskbar never reveal the topmost receiver.
+/// A retained real drag keeps it immediately, because its return path must already be ready.
 const fn drag_boundary_needs_motion(
     control_route: DragControlRoute,
     retained_source_active: bool,
 ) -> bool {
-    matches!(control_route, DragControlRoute::ControlledByPeer) && !retained_source_active
+    matches!(
+        control_route,
+        DragControlRoute::Local | DragControlRoute::ControlledByPeer
+    ) && !retained_source_active
 }
 
 struct Shared {
@@ -1399,6 +1407,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_drag_worker_is_replaced_on_an_unchanged_live_channel() {
+        for has_session in [false, true] {
+            assert_eq!(
+                reconcile_drag_worker(7, Some(7), has_session, true, None, Instant::now()),
+                DragWorkerReconciliation::Drop
+            );
+        }
+        assert_eq!(
+            reconcile_drag_worker(7, Some(7), false, false, None, Instant::now()),
+            DragWorkerReconciliation::Keep
+        );
+    }
+
+    #[test]
     fn active_drag_survives_a_brief_disconnect_and_rebinds_after_reconnect() {
         let now = Instant::now();
         let wait = reconcile_drag_worker(7, None, true, false, None, now);
@@ -1515,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_needs_motion_only_for_controlled_peer_without_active_source() {
+    fn boundary_needs_motion_for_local_and_controlled_peer_without_active_source() {
         assert!(drag_boundary_needs_motion(
             DragControlRoute::ControlledByPeer,
             false
@@ -1524,11 +1546,16 @@ mod tests {
             DragControlRoute::ControlledByPeer,
             true
         ));
+        assert!(drag_boundary_needs_motion(DragControlRoute::Local, false));
+        assert!(!drag_boundary_needs_motion(DragControlRoute::Local, true));
         assert!(!drag_boundary_needs_motion(
             DragControlRoute::ControllingPeer,
             false
         ));
-        assert!(!drag_boundary_needs_motion(DragControlRoute::Local, false));
+        assert!(!drag_boundary_needs_motion(
+            DragControlRoute::ControllingPeer,
+            true
+        ));
         assert!(!drag_boundary_needs_motion(
             DragControlRoute::Relaying,
             false

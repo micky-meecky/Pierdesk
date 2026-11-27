@@ -50,8 +50,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::{PCWSTR, w};
 
 use crate::app_settings::{
-    AppSettings, CrossScreenSettings, MAX_UI_FONT_SCALE_PERCENT, MIN_UI_FONT_SCALE_PERCENT,
-    SharedClipboardSettings, TransferWindowSettings, UiLanguage, UiPreferences, UiTheme,
+    AppSettings, AutoUpdateMode, AutoUpdateSettings, CrossScreenSettings,
+    MAX_UI_FONT_SCALE_PERCENT, MIN_UI_FONT_SCALE_PERCENT, SharedClipboardSettings,
+    TransferWindowSettings, UiLanguage, UiPreferences, UiTheme,
+};
+use crate::auto_update::{
+    AutoUpdateConfig, AutoUpdatePhase, AutoUpdateRuntime, validate_remote_url,
+};
+use crate::auto_update_apply::{
+    StartupApplyOutcome, auto_apply_idle_threshold, launch_self_update, system_idle_duration,
+    try_apply_pending_on_startup,
 };
 use crate::clipboard::{
     ProductCommand, ProductRuntime, ProductSnapshot, ProductTransferDirection, ProductTransferId,
@@ -130,6 +138,9 @@ const COMMAND_CROSS_SCREEN_SETTINGS: usize = 1033;
 const COMMAND_SHARED_CLIPBOARD_ENABLE: usize = 1040;
 const COMMAND_TRANSFER_WINDOW_AUTO_POPUP: usize = 1041;
 const COMMAND_SCREENSHOT: usize = 1042;
+const COMMAND_UPDATE_CHECK: usize = 1043;
+const COMMAND_UPDATE_DOWNLOAD: usize = 1044;
+const COMMAND_UPDATE_APPLY: usize = 1045;
 
 /// Notifies Windows Shell that the running executable changed in place.
 ///
@@ -550,9 +561,12 @@ enum BoundaryWorkspaceTransport {
     ActiveControlChannel,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct TrayState {
     screenshot: crate::screenshot::Manager,
     license: crate::license_runtime::Runtime,
+    auto_update: Option<AutoUpdateRuntime>,
+    auto_update_applying: bool,
     cursor_locator: Option<crate::cursor_locator::CursorLocatorRuntime>,
     ssh: Option<crate::ssh::Runtime>,
     ssh_error: String,
@@ -766,9 +780,25 @@ impl TrayState {
         // SAFETY: IDI_INFORMATION is a predefined shared system resource.
         let ssh_attention_icon =
             unsafe { LoadIconW(None, IDI_INFORMATION) }.map_err(windows_error)?;
+        let auto_update = match AutoUpdateRuntime::start(
+            store.clone(),
+            AutoUpdateConfig::for_current_process(),
+            log_path.clone(),
+        ) {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                let _ = append_log(
+                    &log_path,
+                    &format!("auto_update_start_failed error={error}"),
+                );
+                None
+            }
+        };
         Ok(Self {
             screenshot: crate::screenshot::Manager::new(store.root()),
             license,
+            auto_update,
+            auto_update_applying: false,
             cursor_locator,
             ssh,
             ssh_error,
@@ -818,6 +848,7 @@ impl TrayState {
     }
 
     fn shutdown(&mut self) {
+        self.auto_update.take();
         self.screenshot.shutdown();
         self.ssh.take();
         if let Some(mut cursor_locator) = self.cursor_locator.take() {
@@ -1554,6 +1585,45 @@ impl TrayState {
         model["autostartLastRun"] = last_run_time.into();
         model["pairSwitches"] = pair_switches;
         model["licenseEnabled"] = crate::license_runtime::ENABLED.into();
+        let auto_update_settings =
+            AutoUpdateSettings::load_or_default(&self.store).unwrap_or_default();
+        model["autoUpdate"] = if let Some(snapshot) =
+            self.auto_update.as_ref().map(AutoUpdateRuntime::snapshot)
+        {
+            serde_json::json!({
+                "mode": snapshot.mode.key(),
+                "phase": snapshot.phase.key(),
+                "configured": snapshot.configured,
+                "currentVersion": snapshot.current_version,
+                "availableVersion": snapshot.available_version.as_deref().unwrap_or(""),
+                "notesUrl": snapshot.notes_url.as_deref().unwrap_or(""),
+                "progressPercent": snapshot.progress_percent(),
+                "downloadedText": if snapshot.total_bytes > 0 { format_bytes(snapshot.downloaded_bytes) } else { String::new() },
+                "totalText": if snapshot.total_bytes > 0 { format_bytes(snapshot.total_bytes) } else { String::new() },
+                "lastCheckedUnix": snapshot.last_checked_unix.unwrap_or(0),
+                "lastError": snapshot.last_error.as_deref().unwrap_or(""),
+                "targetWritable": snapshot.target_writable,
+                "canInstallNow": snapshot.can_install_now(),
+                "primarySourceConfigured": snapshot.primary_source_configured,
+            })
+        } else {
+            serde_json::json!({
+                "mode": auto_update_settings.mode.key(),
+                "phase": AutoUpdatePhase::Unconfigured.key(),
+                "configured": false,
+                "currentVersion": env!("CARGO_PKG_VERSION"),
+                "availableVersion": "",
+                "notesUrl": "",
+                "progressPercent": 0,
+                "downloadedText": "",
+                "totalText": "",
+                "lastCheckedUnix": 0,
+                "lastError": "",
+                "targetWritable": false,
+                "canInstallNow": false,
+                "primarySourceConfigured": false,
+            })
+        };
         serde_json::to_string(&model).map_err(io::Error::other)
     }
 
@@ -2445,6 +2515,7 @@ impl TrayState {
             }
         }
         self.poll_pairing_events(command_target);
+        self.poll_auto_update_idle_apply();
         if let Some(message) = crate::traffic_control::diagnostic() {
             let _ = append_log(&self.log_path, &message);
         }
@@ -2919,6 +2990,9 @@ impl TrayState {
             COMMAND_CROSS_SCREEN_ADMIN_RESTART => Self::restart_elevated(),
             COMMAND_CROSS_SCREEN_SETTINGS => self.show_settings(window, "cross"),
             COMMAND_SHARED_CLIPBOARD_ENABLE => self.toggle_shared_clipboard_enabled(),
+            COMMAND_UPDATE_CHECK => self.check_for_updates(),
+            COMMAND_UPDATE_DOWNLOAD => self.download_available_update(),
+            COMMAND_UPDATE_APPLY => self.apply_staged_update(true),
             COMMAND_EXIT => {
                 if !self.confirm_ssh_exit() {
                     return;
@@ -3498,6 +3572,11 @@ impl TrayState {
                 SettingsWindowCommand::OpenLog => self.open_log(),
                 SettingsWindowCommand::OpenLogFolder => self.open_log_folder(),
                 SettingsWindowCommand::OpenSource => Self::open_source(),
+                SettingsWindowCommand::SetAutoUpdateMode(mode) => self.set_auto_update_mode(&mode),
+                SettingsWindowCommand::CheckForUpdates => self.check_for_updates(),
+                SettingsWindowCommand::DownloadUpdate => self.download_available_update(),
+                SettingsWindowCommand::ApplyUpdateNow => self.apply_staged_update(true),
+                SettingsWindowCommand::OpenUpdateNotes => self.open_update_notes(),
                 SettingsWindowCommand::Exit => {
                     if !self.confirm_ssh_exit() {
                         return Ok(());
@@ -3885,6 +3964,183 @@ impl TrayState {
         Ok(())
     }
 
+    fn set_auto_update_mode(&mut self, value: &str) -> io::Result<()> {
+        let mode = AutoUpdateMode::parse(value)?;
+        AutoUpdateSettings { mode }.save(&self.store)?;
+        if let Some(runtime) = self.auto_update.as_ref() {
+            runtime.set_mode(mode)?;
+        }
+        let _ = append_log(
+            &self.log_path,
+            &format!("auto_update_mode_changed mode={}", mode.key()),
+        );
+        Ok(())
+    }
+
+    fn check_for_updates(&self) -> io::Result<()> {
+        let runtime = self
+            .auto_update
+            .as_ref()
+            .ok_or_else(|| io::Error::other("自动更新服务尚未启动"))?;
+        if !runtime.snapshot().configured {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                localized(
+                    self.ui_language,
+                    "当前自编译版本未内置发布签名公钥，已停用自动更新",
+                    "This custom build has no embedded release signing key",
+                ),
+            ));
+        }
+        runtime.check_now()
+    }
+
+    fn download_available_update(&self) -> io::Result<()> {
+        let runtime = self
+            .auto_update
+            .as_ref()
+            .ok_or_else(|| io::Error::other("自动更新服务尚未启动"))?;
+        runtime.download_available()
+    }
+
+    fn open_update_notes(&self) -> io::Result<()> {
+        let notes_url = self
+            .auto_update
+            .as_ref()
+            .and_then(|runtime| runtime.snapshot().notes_url)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "当前没有更新日志链接"))?;
+        validate_remote_url(&notes_url, false)?;
+        let address = wide_null(OsStr::new(&notes_url));
+        // SAFETY: address is a live null-terminated UTF-16 HTTPS URL.
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(address.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize <= 32 {
+            return Err(io::Error::other(format!(
+                "Windows 无法打开更新日志（ShellExecute={}）",
+                result.0 as isize
+            )));
+        }
+        Ok(())
+    }
+
+    fn is_idle_for_silent_update(&self) -> bool {
+        if system_idle_duration() < auto_apply_idle_threshold() {
+            return false;
+        }
+        if self.pending_pairing.is_some() {
+            return false;
+        }
+        if self
+            .ssh
+            .as_ref()
+            .is_some_and(|ssh| ssh.active_session_count() > 0)
+        {
+            return false;
+        }
+        if self
+            .settings_window
+            .as_ref()
+            .is_some_and(SettingsWindow::is_visible)
+        {
+            return false;
+        }
+        if let Some(cross_screen) = self.cross_screen.as_ref() {
+            let state = cross_screen.snapshot().state;
+            if matches!(
+                state,
+                CrossScreenProductState::ControllingPeer
+                    | CrossScreenProductState::ControlledByPeer
+            ) {
+                return false;
+            }
+        }
+        if let Some(runtime) = self.runtime.as_ref() {
+            let snapshot = runtime.snapshot();
+            if snapshot.pending_offer {
+                return false;
+            }
+            if snapshot.transfer_tasks.iter().any(|task| {
+                matches!(
+                    task.transfer.state,
+                    ProductTransferState::Running
+                        | ProductTransferState::Paused
+                        | ProductTransferState::AwaitingPaste
+                )
+            }) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn poll_auto_update_idle_apply(&mut self) {
+        if self.auto_update_applying {
+            return;
+        }
+        let Some(snapshot) = self.auto_update.as_ref().map(AutoUpdateRuntime::snapshot) else {
+            return;
+        };
+        if snapshot.mode != AutoUpdateMode::Silent
+            || snapshot.phase != AutoUpdatePhase::ReadyToInstall
+            || !snapshot.target_writable
+            || snapshot.staged.is_none()
+        {
+            return;
+        }
+        if !self.is_idle_for_silent_update() {
+            return;
+        }
+        if let Err(error) = self.apply_staged_update(false) {
+            let _ = append_log(
+                &self.log_path,
+                &format!("auto_update_idle_apply_failed error={error}"),
+            );
+        }
+    }
+
+    fn apply_staged_update(&mut self, user_initiated: bool) -> io::Result<()> {
+        if self.auto_update_applying {
+            return Ok(());
+        }
+        let runtime = self
+            .auto_update
+            .as_ref()
+            .ok_or_else(|| io::Error::other("自动更新服务尚未启动"))?;
+        let snapshot = runtime.snapshot();
+        let pending = snapshot
+            .staged
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "没有已校验就绪的更新包"))?;
+        if user_initiated && !self.confirm_ssh_exit() {
+            return Ok(());
+        }
+        let require_elevation = !snapshot.target_writable;
+        if require_elevation && !user_initiated {
+            return Ok(());
+        }
+        launch_self_update(&self.store, &pending, require_elevation)?;
+        self.auto_update_applying = true;
+        runtime.mark_applying();
+        let _ = append_log(
+            &self.log_path,
+            &format!(
+                "auto_update_apply_requested version={} user_initiated={user_initiated} require_elevation={require_elevation}",
+                pending.version
+            ),
+        );
+        // SAFETY: the helper was launched; ending this message loop cleanly releases all hooks,
+        // listeners, and the executable lock so the helper can swap and restart Pierdesk.
+        unsafe { PostQuitMessage(0) };
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     fn append_cross_screen_menu(&self, menu: &PopupMenu, language: UiLanguage) -> io::Result<()> {
         let settings = CrossScreenSettings::load_or_default(&self.store)?;
@@ -4030,6 +4286,33 @@ impl TrayState {
             0,
             MF_STRING | MF_DISABLED,
         )?;
+        if let Some(update) = self.auto_update.as_ref().map(AutoUpdateRuntime::snapshot) {
+            if update.can_install_now()
+                && let Some(version) = update.available_version.as_deref()
+            {
+                let label = if update.target_writable {
+                    if language == UiLanguage::English {
+                        format!("Restart to update to v{version}")
+                    } else {
+                        format!("重启以更新到 v{version}")
+                    }
+                } else if language == UiLanguage::English {
+                    format!("Restart to update to v{version} (Admin)")
+                } else {
+                    format!("重启以更新到 v{version}（需管理员确认）")
+                };
+                menu.append(&label, COMMAND_UPDATE_APPLY, MF_STRING)?;
+            } else if update.phase == AutoUpdatePhase::UpdateAvailable
+                && let Some(version) = update.available_version.as_deref()
+            {
+                let label = if language == UiLanguage::English {
+                    format!("Download update v{version}…")
+                } else {
+                    format!("下载新版本 v{version}…")
+                };
+                menu.append(&label, COMMAND_UPDATE_DOWNLOAD, MF_STRING)?;
+            }
+        }
         menu.separator()?;
         menu.append(
             localized(language, "查看状态", "View status"),
@@ -4153,6 +4436,33 @@ impl TrayState {
             COMMAND_LOG,
             MF_STRING,
         )?;
+        if let Some(update) = self.auto_update.as_ref().map(AutoUpdateRuntime::snapshot)
+            && update.configured
+        {
+            let (label, enabled) = match update.phase {
+                AutoUpdatePhase::Checking => (
+                    localized(language, "正在检查更新…", "Checking for updates…").to_owned(),
+                    false,
+                ),
+                AutoUpdatePhase::Downloading => (
+                    if language == UiLanguage::English {
+                        format!("Downloading update ({}%)…", update.progress_percent())
+                    } else {
+                        format!("正在下载更新（{}%）…", update.progress_percent())
+                    },
+                    false,
+                ),
+                AutoUpdatePhase::Applying => (
+                    localized(language, "正在应用更新…", "Applying update…").to_owned(),
+                    false,
+                ),
+                _ => (
+                    localized(language, "检查更新", "Check for updates").to_owned(),
+                    true,
+                ),
+            };
+            menu.append(&label, COMMAND_UPDATE_CHECK, enabled_menu_flags(enabled))?;
+        }
         menu.append(
             localized(language, "关于 Pierdesk…", "About Pierdesk…"),
             COMMAND_ABOUT,
@@ -4792,6 +5102,10 @@ const fn settings_command_success_toast(command: &SettingsWindowCommand) -> Opti
         SettingsWindowCommand::ApplyBoundaryWorkspaceV3 { .. } => {
             Some("P2.5 边界快照已通过校验并保存")
         }
+        SettingsWindowCommand::CheckForUpdates => Some("已开始检查更新"),
+        SettingsWindowCommand::DownloadUpdate => Some("已开始后台下载新版本"),
+        SettingsWindowCommand::ApplyUpdateNow => Some("正在启动更新程序…"),
+        SettingsWindowCommand::OpenUpdateNotes => None,
         _ => Some("设置已应用"),
     }
 }
@@ -5234,8 +5548,13 @@ fn run_inner() -> io::Result<()> {
                 }
             }
         };
-    let tray = TrayWindow::create()?;
     let root = DeviceStore::current_user().map_err(|e| stage_error("identity", e))?;
+    let startup_log = root.root().join("logs").join("clipferry.log");
+    if try_apply_pending_on_startup(&root, &startup_log) == StartupApplyOutcome::HandedOffToUpdater
+    {
+        return Ok(());
+    }
+    let tray = TrayWindow::create()?;
     let identity = crate::update_support::record_identity(root.root(), is_process_elevated())
         .map_err(|e| stage_error("identity", e))?;
     let _ = append_log(
@@ -5294,9 +5613,7 @@ fn post_to_existing(message: u32) -> io::Result<()> {
     // SAFETY: the search is restricted to message-only windows with our private class name.
     let window =
         unsafe { FindWindowExW(Some(HWND_MESSAGE), None, TRAY_WINDOW_CLASS, PCWSTR::null()) }
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::NotFound, "Pierdesk tray is not running")
-            })?;
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "Pierdesk tray is not running"))?;
     // SAFETY: the message contains no pointers and targets the discovered private window.
     unsafe { PostMessageW(Some(window), message, WPARAM(0), LPARAM(0)) }.map_err(windows_error)
 }
@@ -5941,10 +6258,7 @@ mod tests {
     fn autostart_command_quotes_the_executable_and_uses_tray_mode() {
         let command =
             quote_tray_command(Path::new(r"C:\Program Files\Pierdesk\pierdesk.exe")).unwrap();
-        assert_eq!(
-            command,
-            r#""C:\Program Files\Pierdesk\pierdesk.exe" tray"#
-        );
+        assert_eq!(command, r#""C:\Program Files\Pierdesk\pierdesk.exe" tray"#);
         assert!(quote_tray_command(Path::new("C:\\bad\"path\\pierdesk.exe")).is_err());
     }
 

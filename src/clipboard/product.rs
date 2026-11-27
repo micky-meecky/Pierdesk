@@ -14,7 +14,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, GetClipboardSequenceNumber, RemoveClipboardFormatListener,
+    AddClipboardFormatListener, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+    RegisterClipboardFormatW, RemoveClipboardFormatListener,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{
@@ -30,10 +31,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_core::{Error, HRESULT, Interface, Result as WindowsResult, w};
 
-use super::data_object::{SourceFactory, VirtualFileDataObject, VirtualFileEntry};
+use super::data_object::{
+    HdropGate, HdropProvider, SourceFactory, VirtualFileDataObject, VirtualFileEntry,
+};
+use super::local_cache::{LocalFileMaterializer, MaterializeLogger, clipboard_hdrop_policy};
 use super::local_file::{
-    CaptureError, CaptureFormats, ClipboardCapture, FileTreeSnapshot, LocalOfferRegistry,
-    capture_files_from_clipboard,
+    CaptureError, CaptureFormats, CaptureRejection, ClipboardCapture, FileTreeSnapshot,
+    LocalOfferRegistry, capture_files_from_clipboard,
 };
 use super::probe::ProbeState;
 use super::runtime::{ole_flush_clipboard_with_retry, ole_set_clipboard_with_retry};
@@ -661,12 +665,27 @@ impl RemoteTransferTask {
     }
 }
 
+struct ClipboardRegisteringGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for ClipboardRegisteringGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
 impl ProductRemoteLease {
-    fn register(client: &SecureOfferClient, generation: u64) -> WindowsResult<Self> {
+    fn register(
+        store: &DeviceStore,
+        log_path: &std::path::Path,
+        client: &SecureOfferClient,
+        generation: u64,
+    ) -> WindowsResult<Self> {
         let manifest = client.fetch_manifest().map_err(io_to_windows)?;
         let registry = Arc::new(RemoteTransferRegistry::default());
         registry.bind_task(client.clone(), manifest.offer_id);
-        let entries = manifest
+        let entries: Vec<VirtualFileEntry> = manifest
             .entries
             .iter()
             .map(|entry| {
@@ -691,15 +710,57 @@ impl ProductRemoteLease {
             })
             .collect();
         let probe = Arc::new(ProbeState::quiet());
-        let object = VirtualFileDataObject::create_with_entries(
+        let log_path_for_cache = log_path.to_path_buf();
+        let cache_logger: MaterializeLogger = Arc::new(move |line| {
+            let _ = append_product_log(&log_path_for_cache, line);
+        });
+        let materializer = Arc::new(LocalFileMaterializer::new(
+            store.root().join("clipboard-cache"),
+            "paste-",
+            format!("paste-{}-p{}", manifest.offer_id, std::process::id()),
+            entries.clone(),
+            "clipboard_hdrop",
+            Some(cache_logger),
+        ));
+        let provider_materializer = Arc::clone(&materializer);
+        let hdrop_provider: HdropProvider =
+            Arc::new(move || provider_materializer.hdrop_paths_for_clipboard());
+        let registering_clipboard = Arc::new(AtomicBool::new(true));
+        let gate_registering = Arc::clone(&registering_clipboard);
+        let gate_log_path = log_path.to_path_buf();
+        let last_policy = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let hdrop_gate: HdropGate = Arc::new(move || {
+            let registering = gate_registering.load(Ordering::Acquire);
+            let (offered, process) = clipboard_hdrop_policy(registering);
+            if !registering {
+                let policy = if offered { 1 } else { 2 };
+                if last_policy.swap(policy, Ordering::AcqRel) != policy {
+                    let _ = append_product_log(
+                        &gate_log_path,
+                        &format!(
+                            "clipboard_hdrop_policy offered={offered} target_process={}",
+                            process.as_deref().unwrap_or("unavailable")
+                        ),
+                    );
+                }
+            }
+            offered
+        });
+        let object = VirtualFileDataObject::create_with_entries_and_hdrop(
             entries,
             Arc::clone(&probe),
             manifest.origin_payload(),
+            hdrop_provider,
+            hdrop_gate,
         )?;
         let capability: IDataObjectAsyncCapability = object.cast()?;
         // SAFETY: the object implements the capability and remains alive in this lease.
         unsafe { capability.SetAsyncMode(true) }?;
+        let registering_guard = ClipboardRegisteringGuard {
+            flag: registering_clipboard,
+        };
         ole_set_clipboard_with_retry(&object)?;
+        drop(registering_guard);
         let task = Arc::new(RemoteTransferTask {
             registry,
             manifest,
@@ -768,6 +829,21 @@ impl ProductTextLease {
         // SAFETY: the COM pointer remains owned by this STA-local lease.
         (unsafe { ole_is_current_clipboard_raw(Interface::as_raw(&self.object)) }) == S_OK
     }
+
+    /// Replaces the pending object with a fully ready object that permits Windows Clipboard
+    /// History (`Win + V`) while continuing to prohibit Microsoft Cloud Clipboard sync and
+    /// preserving the Pierdesk origin marker so this computer never echoes the item back.
+    fn promote_for_history(&mut self, snapshot: &SharedClipboardSnapshot) -> WindowsResult<bool> {
+        let object = SharedTextDataObject::create_ready(snapshot, true)?;
+        match ole_set_clipboard_with_retry(&object) {
+            Ok(()) => {
+                self.object = object;
+                Ok(true)
+            }
+            Err(error) if error.code() == CLIPBRD_E_CANT_OPEN => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl Drop for ProductTextLease {
@@ -793,6 +869,7 @@ struct TextCaptureRequest {
     generation: u64,
     begin: SharedTextBegin,
     started_at: Instant,
+    image_only: bool,
 }
 
 #[derive(Default)]
@@ -843,7 +920,15 @@ impl TextCaptureWorker {
                         &thread_cancelled,
                         &thread_latest_generation,
                         request.generation,
-                        policy,
+                        if request.image_only {
+                            SharedCapturePolicy {
+                                text: false,
+                                rich_text: false,
+                                image: policy.image,
+                            }
+                        } else {
+                            policy
+                        },
                     );
                     if event_sender
                         .send(WorkerEvent::LocalTextCapture(LocalTextCaptureEvent {
@@ -1364,6 +1449,22 @@ impl ProductSession {
         self.remote_text.take();
         match capture_files_from_clipboard(window, self.formats) {
             Ok(ClipboardCapture::Candidates { paths, sequence }) => {
+                // QQ exposes copied chat images as both a copied file and a bitmap. Its
+                // private rich-edit marker distinguishes this from Explorer file copies.
+                let qq_format =
+                    unsafe { RegisterClipboardFormatW(w!("QQ_Unicode_RichEdit_Format")) };
+                let qq_rich =
+                    qq_format != 0 && unsafe { IsClipboardFormatAvailable(qq_format) }.is_ok();
+                if qq_image_prefers_shared(qq_rich, &self.announced_shared_kinds()) {
+                    let _ = append_product_log(
+                        &self.log_path,
+                        &format!(
+                            "shared_clipboard phase=qq_file_fallback_image generation={generation}"
+                        ),
+                    );
+                    self.begin_local_shared_image_capture(generation);
+                    return;
+                }
                 super::paste_fence::mark_not_shared(generation);
                 if sequence != 0 {
                     self.last_clipboard_sequence = Some(sequence);
@@ -1376,6 +1477,20 @@ impl ProductSession {
                         self.set_error(message);
                     }
                 }
+            }
+            Ok(ClipboardCapture::Rejected(reason))
+                if falls_back_to_shared_image(reason, &self.announced_shared_kinds()) =>
+            {
+                // Chat apps such as WeChat/QQ publish "copy image" as a cached temp-file path
+                // plus a bitmap, without Preferred DropEffect. The bitmap is the user's intent and
+                // pastes into far more targets than a virtual file, so send it as a shared image.
+                let _ = append_product_log(
+                    &self.log_path,
+                    &format!(
+                        "shared_clipboard phase=file_fallback_image reason={reason} generation={generation}"
+                    ),
+                );
+                self.begin_local_shared_capture(generation);
             }
             Ok(ClipboardCapture::Rejected(reason)) => {
                 super::paste_fence::mark_not_shared(generation);
@@ -1397,11 +1512,31 @@ impl ProductSession {
         }
     }
 
-    fn begin_local_shared_capture(&mut self, generation: u64) {
+    fn announced_shared_kinds(&self) -> Arc<[SharedFormatKind]> {
         let policy = shared_capture_policy(self.shared_settings);
-        let kinds = self
-            .shared_formats
-            .map_or_else(|| Arc::from([]), |formats| formats.announced_kinds(policy));
+        self.shared_formats
+            .map_or_else(|| Arc::from([]), |formats| formats.announced_kinds(policy))
+    }
+
+    fn begin_local_shared_capture(&mut self, generation: u64) {
+        self.begin_local_shared_capture_with_policy(generation, false);
+    }
+
+    fn begin_local_shared_image_capture(&mut self, generation: u64) {
+        self.begin_local_shared_capture_with_policy(generation, true);
+    }
+
+    fn begin_local_shared_capture_with_policy(&mut self, generation: u64, image_only: bool) {
+        let all_kinds = self.announced_shared_kinds();
+        let kinds: Arc<[SharedFormatKind]> = if image_only {
+            all_kinds
+                .iter()
+                .copied()
+                .filter(|kind| kind.is_image())
+                .collect()
+        } else {
+            all_kinds
+        };
         if kinds.is_empty() {
             super::paste_fence::mark_not_shared(generation);
             return;
@@ -1465,6 +1600,7 @@ impl ProductSession {
                 generation,
                 begin,
                 started_at: Instant::now(),
+                image_only,
             });
         }
     }
@@ -1668,11 +1804,35 @@ impl ProductSession {
                 "a newer local clipboard value won before shared text became ready",
             ));
         }
-        // The inbox thread has already completed this object's synchronized text state. Flushing
-        // renders the complete value into a static clipboard payload so it survives Pierdesk
-        // exiting. Clipboard listeners can briefly hold the Win32 clipboard immediately after the
-        // pending object was installed, so contention is retried and then deferred rather than
-        // turning an already-usable remote value into a failed network transfer.
+        // The inbox thread has already completed this object's synchronized text state. Re-publish
+        // the now-ready payload with Windows Clipboard History enabled (while keeping Cloud
+        // Clipboard disabled and the private origin marker intact) so `Win + V` records the
+        // complete text/image without racing the pending network transfer. Flushing then renders
+        // the complete value into a static clipboard payload so it survives Pierdesk exiting.
+        // Clipboard listeners can briefly hold the Win32 clipboard immediately after the pending
+        // object was installed, so contention is retried and then deferred rather than turning an
+        // already-usable remote value into a failed network transfer.
+        match lease.promote_for_history(&event.snapshot) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = append_product_log(
+                    &self.log_path,
+                    &format!(
+                        "shared_clipboard phase=receive_history_promote_skipped revision={} reason=clipboard_busy",
+                        event.snapshot.revision,
+                    ),
+                );
+            }
+            Err(error) => {
+                let _ = append_product_log(
+                    &self.log_path,
+                    &format!(
+                        "shared_clipboard phase=receive_history_promote_failed revision={} error={error}",
+                        event.snapshot.revision,
+                    ),
+                );
+            }
+        }
         let flush_started_at = Instant::now();
         match ole_flush_clipboard_with_retry() {
             Ok(report) => {
@@ -2020,7 +2180,8 @@ impl ProductSession {
         self.prepare_remote_task_slot()?;
         let client = build_offer_client(&self.store, &self.settings, announcement.endpoint)?;
         let generation = self.allocate_transfer_generation();
-        let remote = ProductRemoteLease::register(&client, generation).map_err(windows_to_io)?;
+        let remote = ProductRemoteLease::register(&self.store, &self.log_path, &client, generation)
+            .map_err(windows_to_io)?;
         let summary = summarize_manifest("接收", &remote.task.manifest);
         let total_size = summary.total_size;
         let total_files = summary.files;
@@ -2366,6 +2527,16 @@ fn claim_clipboard_sequence(last_sequence: &mut Option<u32>, observed_sequence: 
     }
     *last_sequence = Some(observed_sequence);
     true
+}
+
+/// A file clipboard without an explicit copy/cut marker is only refused when nothing else on the
+/// clipboard can carry the user's intent. An explicit cut stays refused even with a bitmap.
+fn falls_back_to_shared_image(reason: CaptureRejection, kinds: &[SharedFormatKind]) -> bool {
+    reason == CaptureRejection::MissingCopyEffect && kinds.iter().any(|kind| kind.is_image())
+}
+
+fn qq_image_prefers_shared(qq_rich: bool, kinds: &[SharedFormatKind]) -> bool {
+    qq_rich && kinds.iter().any(|kind| kind.is_image())
 }
 
 const fn shared_capture_policy(settings: SharedClipboardSettings) -> SharedCapturePolicy {
@@ -3854,6 +4025,41 @@ mod tests {
     static NEXT_TEST_STORE: AtomicU64 = AtomicU64::new(1);
 
     #[test]
+    fn qq_copied_file_with_image_uses_shared_image() {
+        assert!(qq_image_prefers_shared(true, &[SharedFormatKind::DibV5]));
+        assert!(!qq_image_prefers_shared(false, &[SharedFormatKind::DibV5]));
+        assert!(!qq_image_prefers_shared(true, &[SharedFormatKind::Html]));
+        assert!(!qq_image_prefers_shared(true, &[]));
+    }
+
+    #[test]
+    fn unmarked_file_clipboard_with_bitmap_falls_back_to_shared_image() {
+        // WeChat "复制" on an image: CF_HDROP temp file + bitmap, no Preferred DropEffect.
+        for image in [
+            SharedFormatKind::Png,
+            SharedFormatKind::DibV5,
+            SharedFormatKind::Dib,
+        ] {
+            assert!(falls_back_to_shared_image(
+                CaptureRejection::MissingCopyEffect,
+                &[SharedFormatKind::UnicodeText, image],
+            ));
+        }
+        assert!(!falls_back_to_shared_image(
+            CaptureRejection::MissingCopyEffect,
+            &[SharedFormatKind::UnicodeText],
+        ));
+        assert!(!falls_back_to_shared_image(
+            CaptureRejection::MissingCopyEffect,
+            &[]
+        ));
+        assert!(!falls_back_to_shared_image(
+            CaptureRejection::CutOperation,
+            &[SharedFormatKind::Png],
+        ));
+    }
+
+    #[test]
     fn task_controls_support_both_live_directions() {
         for state in [
             ProductTransferState::AwaitingPaste,
@@ -5096,5 +5302,78 @@ mod tests {
         assert!(!snapshot.pending_offer);
         runtime.stop();
         assert!(!runtime.snapshot().listener_running);
+    }
+
+    #[test]
+    fn clipboard_remote_data_object_materializes_local_hdrop_only_when_gate_allows() {
+        use windows::Win32::System::Com::{FORMATETC, TYMED_HGLOBAL};
+        use windows::Win32::System::Ole::{CF_HDROP, ReleaseStgMedium};
+        use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+        let test_store = TestStore::new("clipboard-hdrop-object");
+        let payload = b"wechat-paste-image-payload";
+        let source: Arc<dyn ReadAtSource> = Arc::new(crate::clipboard::source::MemorySource::new(&payload[..]));
+        let offered = SecureOfferedFile::new_tree(
+            vec![(
+                crate::clipboard::data_object::VirtualFileDescriptor::basic(
+                    Arc::from("聊天图片.png"),
+                    u64::try_from(payload.len()).unwrap(),
+                ),
+                Some(Arc::clone(&source)),
+            )],
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let manifest = offered.manifest();
+        let entries = vec![VirtualFileEntry::file(
+            manifest.entries[0].descriptor.clone(),
+            Arc::new(move || Arc::clone(&source)),
+        )];
+        let materializer = Arc::new(LocalFileMaterializer::new(
+            test_store.store.root().join("clipboard-cache"),
+            "paste-",
+            format!("paste-{}", manifest.offer_id),
+            entries.clone(),
+            "clipboard_hdrop",
+            None,
+        ));
+        let allow_hdrop = Arc::new(AtomicBool::new(false));
+        let gate_flag = Arc::clone(&allow_hdrop);
+        let provider_materializer = Arc::clone(&materializer);
+        let object = VirtualFileDataObject::create_with_entries_and_hdrop(
+            entries,
+            Arc::new(ProbeState::quiet()),
+            manifest.origin_payload(),
+            Arc::new(move || provider_materializer.hdrop_paths_for_clipboard()),
+            Arc::new(move || gate_flag.load(Ordering::Acquire)),
+        )
+        .unwrap();
+
+        let format = FORMATETC {
+            cfFormat: CF_HDROP.0,
+            ptd: std::ptr::null_mut(),
+            dwAspect: windows::Win32::System::Com::DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0.cast_unsigned(),
+        };
+        // Explorer / background clipboard listeners see the gate closed and stay on virtual streams.
+        assert_ne!(unsafe { object.QueryGetData(&raw const format) }, S_OK);
+        assert!(!materializer.is_materialized());
+
+        // Foreground third-party apps (WeChat, WorkBuddy, Codex, etc.) receive materialized CF_HDROP.
+        allow_hdrop.store(true, Ordering::Release);
+        assert_eq!(unsafe { object.QueryGetData(&raw const format) }, S_OK);
+        let mut medium = unsafe { object.GetData(&raw const format) }.unwrap();
+        assert_eq!(medium.tymed, TYMED_HGLOBAL.0.cast_unsigned());
+        let hdrop = HDROP(unsafe { medium.u.hGlobal }.0);
+        let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
+        assert_eq!(count, 1);
+        let len = unsafe { DragQueryFileW(hdrop, 0, None) };
+        let mut wide = vec![0_u16; usize::try_from(len).unwrap() + 1];
+        let copied = unsafe { DragQueryFileW(hdrop, 0, Some(&mut wide)) };
+        assert_eq!(copied, len);
+        let pasted_path = std::path::PathBuf::from(String::from_utf16_lossy(&wide[..usize::try_from(len).unwrap()]));
+        assert_eq!(std::fs::read(&pasted_path).unwrap(), payload);
+        unsafe { ReleaseStgMedium(&raw mut medium) };
     }
 }

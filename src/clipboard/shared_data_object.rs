@@ -27,11 +27,11 @@ use super::probe::ProbeState;
 use super::shared_diagnostics::SharedTrace;
 use super::shared_protocol::{SharedFormatDescriptor, SharedTextBegin};
 #[cfg(test)]
-use super::snapshot::{ClipboardEventId, SharedClipboardSnapshot};
+use super::snapshot::ClipboardEventId;
 use super::snapshot::{
     HTML_FORMAT_NAME, MAX_IMAGE_DECODED_BYTES, MAX_IMAGE_DIMENSION, PNG_FORMAT_NAME,
-    RTF_FORMAT_NAME, SHARED_ORIGIN_FORMAT, SHARED_ORIGIN_PREFIX, SharedFormatData,
-    SharedFormatKind, validate_format_set,
+    RTF_FORMAT_NAME, SHARED_ORIGIN_FORMAT, SHARED_ORIGIN_PREFIX, SharedClipboardSnapshot,
+    SharedFormatData, SharedFormatKind, validate_format_set,
 };
 use super::{catch_com_hresult, catch_com_result};
 
@@ -149,6 +149,7 @@ pub(crate) struct SharedTextDataObject {
     formats: SharedFormats,
     content: Arc<PendingContent>,
     origin_payload: Arc<[u8]>,
+    include_in_history: bool,
     probe: Arc<ProbeState>,
 }
 
@@ -279,9 +280,20 @@ impl PendingContent {
 impl SharedTextDataObject {
     #[cfg(test)]
     pub(crate) fn create(snapshot: &SharedClipboardSnapshot) -> Result<IDataObject> {
+        Self::create_ready(snapshot, false)
+    }
+
+    pub(crate) fn create_ready(
+        snapshot: &SharedClipboardSnapshot,
+        include_in_history: bool,
+    ) -> Result<IDataObject> {
         let begin =
             SharedTextBegin::from_snapshot(snapshot).map_err(|error| io_to_windows(&error))?;
-        let (object, pending) = Self::create_pending(&begin)?;
+        let (object, pending) = Self::create_pending_traced(
+            &begin,
+            SharedTrace::new(&begin, "data_object"),
+            include_in_history,
+        )?;
         pending
             .complete(Arc::clone(&snapshot.formats))
             .map_err(|error| io_to_windows(&error))?;
@@ -291,12 +303,13 @@ impl SharedTextDataObject {
     pub(crate) fn create_pending(
         begin: &SharedTextBegin,
     ) -> Result<(IDataObject, PendingSharedText)> {
-        Self::create_pending_traced(begin, SharedTrace::new(begin, "data_object"))
+        Self::create_pending_traced(begin, SharedTrace::new(begin, "data_object"), false)
     }
 
     fn create_pending_traced(
         begin: &SharedTextBegin,
         trace: SharedTrace,
+        include_in_history: bool,
     ) -> Result<(IDataObject, PendingSharedText)> {
         let content = Arc::new(PendingContent {
             trace,
@@ -316,6 +329,7 @@ impl SharedTextDataObject {
             formats: SharedFormats::register(&begin.formats)?,
             content,
             origin_payload: origin_payload.into(),
+            include_in_history,
             probe: Arc::new(ProbeState::quiet()),
         }
         .into();
@@ -374,10 +388,12 @@ impl SharedTextDataObject {
         if format.cfFormat == self.formats.origin {
             return hglobal_medium(&self.origin_payload);
         }
-        if format.cfFormat == self.formats.can_upload_to_cloud
-            || format.cfFormat == self.formats.can_include_in_history
-        {
+        if format.cfFormat == self.formats.can_upload_to_cloud {
             return hglobal_medium(&0_u32.to_le_bytes());
+        }
+        if format.cfFormat == self.formats.can_include_in_history {
+            let allowed = u32::from(self.include_in_history);
+            return hglobal_medium(&allowed.to_le_bytes());
         }
         let kind = self
             .formats
@@ -622,7 +638,6 @@ fn write_i32(target: &mut [u8], offset: usize, value: i32) {
     target[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(test)]
 fn io_to_windows(error: &io::Error) -> Error {
     Error::new(E_FAIL, error.to_string())
 }
@@ -715,7 +730,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::sync_channel(64);
         let trace = SharedTrace::for_test(sender);
         let (object, pending) =
-            SharedTextDataObject::create_pending_traced(&begin, trace.clone()).unwrap();
+            SharedTextDataObject::create_pending_traced(&begin, trace.clone(), false).unwrap();
         let format = format_etc(CF_UNICODETEXT.0, -1, TYMED_HGLOBAL.0.cast_unsigned());
         let wait_started = Instant::now();
         assert_eq!(
@@ -750,9 +765,12 @@ mod tests {
         let snapshot = snapshot();
         let begin = SharedTextBegin::from_snapshot(&snapshot).unwrap();
         let (sender, receiver) = std::sync::mpsc::sync_channel(512);
-        let (object, pending) =
-            SharedTextDataObject::create_pending_traced(&begin, SharedTrace::for_test(sender))
-                .unwrap();
+        let (object, pending) = SharedTextDataObject::create_pending_traced(
+            &begin,
+            SharedTrace::for_test(sender),
+            false,
+        )
+        .unwrap();
         pending.complete(Arc::clone(&snapshot.formats)).unwrap();
         let format = format_etc(CF_UNICODETEXT.0, -1, TYMED_HGLOBAL.0.cast_unsigned());
         for _ in 0..40 {
@@ -867,5 +885,43 @@ mod tests {
         let _ = unsafe { GlobalUnlock(global) };
         unsafe { ReleaseStgMedium(&raw mut medium) };
         unsafe { OleUninitialize() };
+    }
+
+    #[test]
+    fn history_policy_excludes_pending_and_allows_ready_while_blocking_cloud() {
+        let read_u32 = |object: &IDataObject, format_id: u16| -> u32 {
+            let format = format_etc(format_id, -1, TYMED_HGLOBAL.0.cast_unsigned());
+            assert_eq!(unsafe { object.QueryGetData(&raw const format) }, S_OK);
+            let mut medium = unsafe { object.GetData(&raw const format) }.unwrap();
+            let global = unsafe { medium.u.hGlobal };
+            assert_eq!(unsafe { GlobalSize(global) }, 4);
+            let pointer = unsafe { GlobalLock(global) }.cast::<u8>();
+            assert!(!pointer.is_null());
+            let mut bytes = [0_u8; 4];
+            bytes.copy_from_slice(unsafe { std::slice::from_raw_parts(pointer, 4) });
+            let _ = unsafe { GlobalUnlock(global) };
+            unsafe { ReleaseStgMedium(&raw mut medium) };
+            u32::from_le_bytes(bytes)
+        };
+
+        let snapshot = snapshot();
+        let begin = SharedTextBegin::from_snapshot(&snapshot).unwrap();
+        let (pending_object, _pending) = SharedTextDataObject::create_pending(&begin).unwrap();
+        let ready_object = SharedTextDataObject::create_ready(&snapshot, true).unwrap();
+
+        let history_format = register_format(CAN_INCLUDE_IN_HISTORY_FORMAT).unwrap();
+        let cloud_format = register_format(CAN_UPLOAD_TO_CLOUD_FORMAT).unwrap();
+        let origin_format = register_format(SHARED_ORIGIN_FORMAT).unwrap();
+
+        assert_eq!(read_u32(&pending_object, history_format), 0);
+        assert_eq!(read_u32(&pending_object, cloud_format), 0);
+        assert_eq!(read_u32(&ready_object, history_format), 1);
+        assert_eq!(read_u32(&ready_object, cloud_format), 0);
+
+        let origin_req = format_etc(origin_format, -1, TYMED_HGLOBAL.0.cast_unsigned());
+        assert_eq!(
+            unsafe { ready_object.QueryGetData(&raw const origin_req) },
+            S_OK
+        );
     }
 }

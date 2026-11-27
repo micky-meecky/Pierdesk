@@ -7,7 +7,9 @@
 .env
 .env.*
 /scripts/clipferry-deploy-targets.local.psd1
+/scripts/update-release.local.psd1
 signing-key.pk8
+update-signing.pk8
 *.sqlite*
 *.dpapi
 

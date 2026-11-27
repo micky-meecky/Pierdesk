@@ -5,6 +5,7 @@ pub(crate) mod drag_live;
 mod drag_probe;
 mod file_relay;
 mod format_enum;
+mod local_cache;
 mod local_file;
 mod loopback;
 pub(crate) mod paste_fence;

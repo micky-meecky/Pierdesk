@@ -1,30 +1,28 @@
 #![allow(clippy::inline_always, clippy::ref_as_ptr)]
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::cell::Cell;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
+use std::io;
 use std::mem::size_of;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, E_POINTER,
-    HINSTANCE, HWND, LPARAM, LRESULT, POINT, POINTL, RECT, S_OK, WPARAM,
+    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HINSTANCE, HWND,
+    LPARAM, LRESULT, POINT, RECT, S_OK, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, RDW_ALLCHILDREN,
     RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow, ScreenToClient,
 };
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, CoCreateInstance, CoTaskMemFree, DATADIR_GET,
-    FORMATETC, IDataObject, IServiceProvider, STGMEDIUM, TYMED_HGLOBAL, TYMED_ISTREAM,
+    CLSCTX_LOCAL_SERVER, CoCreateInstance, CoTaskMemFree, DATADIR_GET, FORMATETC, IDataObject,
+    IServiceProvider, STGMEDIUM, TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::{
     GetClipboardFormatNameW, GetClipboardSequenceNumber, RegisterClipboardFormatW,
@@ -32,8 +30,8 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource,
-    IDropSource_Impl, IDropSourceNotify, IDropSourceNotify_Impl, IDropTarget, IDropTarget_Impl,
-    OleInitialize, OleUninitialize, ReleaseStgMedium,
+    IDropSource_Impl, IDropSourceNotify, IDropSourceNotify_Impl, OleInitialize, OleUninitialize,
+    ReleaseStgMedium,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -45,33 +43,35 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, CLSID_DragDropHelper, DragQueryFileW,
-    FOLDERID_Desktop, FWF_AUTOARRANGE, Folder2, HDROP, IDataObjectAsyncCapability,
-    IDropTargetHelper, IFolderView, IShellBrowser, IShellFolder, IShellFolderViewDual2,
-    IShellWindows, IWebBrowser2, IsUserAnAdmin, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    SID_STopLevelBrowser, SVGIO_ALLVIEW, SVSI_POSITIONITEM, SWC_DESKTOP, SWFO_NEEDDISPATCH,
-    ShellWindows,
+    CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, DragQueryFileW, FOLDERID_Desktop, FWF_AUTOARRANGE,
+    Folder2, HDROP, IDataObjectAsyncCapability, IFolderView, IShellBrowser, IShellFolder,
+    IShellFolderViewDual2, IShellWindows, IWebBrowser2, IsUserAnAdmin, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath, SID_STopLevelBrowser, SVGIO_ALLVIEW, SVSI_POSITIONITEM, SWC_DESKTOP,
+    SWFO_NEEDDISPATCH, ShellWindows,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW, GA_ROOT,
     GetAncestor, GetClassNameW, GetCursorPos, GetParent, GetSystemMetrics, GetWindowRect,
-    GetWindowThreadProcessId, HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW,
+    HWND_TOPMOST, LWA_ALPHA, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW,
     PostThreadMessageW, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_SHOWWINDOW, SendMessageW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_SETREDRAW,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WindowFromPoint,
+    SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW,
+    SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_SETREDRAW, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
-use windows_core::{BOOL, Error, HRESULT, Interface, PCWSTR, Ref, Result, implement, w};
+use windows_core::{BOOL, HRESULT, Interface, PCWSTR, Result, implement, w};
 
 use super::data_object::{
     HdropGate, HdropProvider, SourceFactory, VirtualFileDataObject, VirtualFileEntry, format_etc,
 };
 use super::drag_helper::{
-    DragCaptureEvent, DragCaptureHelper, foreground_process_diagnostic, process_image,
+    DragCaptureEvent, DragCaptureHelper, drag_helper_launch_mode, foreground_process_diagnostic,
 };
-use super::drag_probe::{DragProbeEdge, RegisteredBoundaryWindow};
+use super::drag_probe::DragProbeEdge;
+use super::local_cache::{
+    LocalFileMaterializer, MaterializeLogger, drag_hdrop_policy, is_explorer_process,
+    window_process_name,
+};
 use super::local_file::{FileTreeSnapshot, LocalOfferRegistry};
 use super::probe::{ProbeState, ShellTransferSnapshot};
 use super::product::{ReverseOfferTunnel, start_drag_source_offer};
@@ -97,10 +97,11 @@ const SHELL_PENDING: u8 = 0;
 const SHELL_SUCCEEDED: u8 = 1;
 const SHELL_CANCELLED: u8 = 2;
 const SHELL_FAILED: u8 = 3;
+const HDROP_LOCK_UNSET: u8 = 0;
+const HDROP_LOCK_ALLOW: u8 = 1;
+const HDROP_LOCK_DENY: u8 = 2;
 const FILE_DRAG_EDGE_THICKNESS: u32 = 8;
 const FILE_DRAG_TASKBAR_THICKNESS: u32 = 96;
-const LOCAL_DROP_CACHE_RETENTION: Duration = Duration::from_hours(168);
-const LOCAL_DROP_READ_BUFFER: usize = 1024 * 1024;
 // A target that received CF_HDROP already owns complete local files when DoDragDrop returns.
 // Some call StartOperation without ever calling EndOperation, so only give late GetData calls a
 // short window instead of holding the transfer open for the five-minute virtual-stream limit.
@@ -1087,7 +1088,7 @@ impl DragBridge {
         self.source_id.store(id, Ordering::Release);
     }
 
-    fn capture_helper_paths(&self, paths: Vec<PathBuf>) {
+    fn capture_helper_paths(&self, capture: &str, paths: Vec<PathBuf>) {
         if paths.is_empty()
             || self.stop.load(Ordering::Acquire)
             || self.target_pending()
@@ -1098,7 +1099,7 @@ impl DragBridge {
         let id = self.next_id.fetch_add(1, Ordering::AcqRel);
         self.begin_source_capture(id);
         self.log(&format!(
-            "event=drag_enter id={id} paths={} capture=desktop_shell_helper boundary_visible={} remote_controlled={}",
+            "event=drag_enter id={id} paths={} capture={capture} boundary_visible={} remote_controlled={}",
             paths.len(),
             self.boundary_visible.load(Ordering::Acquire),
             self.source_remote_controlled.load(Ordering::Acquire),
@@ -1930,184 +1931,6 @@ impl Drop for Apartment {
     }
 }
 
-#[implement(IDropTarget)]
-struct EdgeTarget {
-    bridge: Arc<DragBridge>,
-    helper: IDropTargetHelper,
-    window: Rc<Cell<windows::Win32::Foundation::HWND>>,
-    retained_source: Rc<RefCell<Option<RetainedSourceObject>>>,
-}
-impl IDropTarget_Impl for EdgeTarget_Impl {
-    fn DragEnter(
-        &self,
-        object: Ref<IDataObject>,
-        _: MODIFIERKEYS_FLAGS,
-        point: &POINTL,
-        effect: *mut DROPEFFECT,
-    ) -> Result<()> {
-        catch_com_result(|| {
-            if effect.is_null() {
-                return Err(Error::from_hresult(E_POINTER));
-            }
-            // Reject Move even if Shift is held. This target only stages a remote copy.
-            unsafe {
-                effect.write(DROPEFFECT_NONE);
-            }
-            if self.bridge.source_return_presenting.load(Ordering::Acquire)
-                && self.bridge.source_id.load(Ordering::Acquire) != 0
-            {
-                self.bridge.log(&format!(
-                    "event=source_return_boundary_reenter id={} x={} y={}",
-                    self.bridge.source_id.load(Ordering::Acquire),
-                    point.x,
-                    point.y,
-                ));
-                unsafe {
-                    effect.write(DROPEFFECT_COPY);
-                    let point = POINT {
-                        x: point.x,
-                        y: point.y,
-                    };
-                    if let Some(object) = object.cloned() {
-                        let _ = self.helper.DragEnter(
-                            self.window.get(),
-                            &object,
-                            &raw const point,
-                            DROPEFFECT_COPY,
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            if self.bridge.target_pending() || self.bridge.source_id.load(Ordering::Acquire) != 0 {
-                return Ok(());
-            }
-            let object = object
-                .cloned()
-                .ok_or_else(|| Error::from_hresult(E_POINTER))?;
-            match real_paths(&object) {
-                Ok(paths) => {
-                    let id = self.bridge.next_id.fetch_add(1, Ordering::AcqRel);
-                    self.bridge.begin_source_capture(id);
-                    self.bridge.log(&format!(
-                        "event=drag_enter id={id} x={} y={} paths={} boundary_visible={} remote_controlled={}",
-                        point.x,
-                        point.y,
-                        paths.len(),
-                        self.bridge.boundary_visible.load(Ordering::Acquire),
-                        self.bridge.source_remote_controlled.load(Ordering::Acquire),
-                    ));
-                    self.bridge.send(id, DragMessage::CANDIDATE, 0);
-                    *self.retained_source.borrow_mut() = Some(RetainedSourceObject {
-                        id,
-                        _object: object.clone(),
-                        image: Vec::new(),
-                    });
-                    *self.bridge.captured.lock().expect("drag capture lock") = Some(paths);
-                    unsafe {
-                        effect.write(DROPEFFECT_COPY);
-                        let point = POINT {
-                            x: point.x,
-                            y: point.y,
-                        };
-                        let _ = self.helper.DragEnter(
-                            self.window.get(),
-                            &object,
-                            &raw const point,
-                            DROPEFFECT_COPY,
-                        );
-                    }
-                }
-                Err(error) => self.bridge.log(&format!(
-                    "event=capture_rejected capture=in_process reason={error} {}",
-                    drag_source_diagnostic(&object)
-                )),
-            }
-            Ok(())
-        })
-    }
-    fn DragOver(
-        &self,
-        _: MODIFIERKEYS_FLAGS,
-        point: &POINTL,
-        effect: *mut DROPEFFECT,
-    ) -> Result<()> {
-        if effect.is_null() {
-            return Err(Error::from_hresult(E_POINTER));
-        }
-        unsafe {
-            effect.write(if self.bridge.local_candidate.load(Ordering::Acquire) {
-                DROPEFFECT_COPY
-            } else {
-                DROPEFFECT_NONE
-            });
-            let point = POINT {
-                x: point.x,
-                y: point.y,
-            };
-            let _ = self.helper.DragOver(&raw const point, effect.read());
-        }
-        Ok(())
-    }
-    fn DragLeave(&self) -> Result<()> {
-        let _ = unsafe { self.helper.DragLeave() };
-        let active = self.bridge.source_active.load(Ordering::Acquire);
-        let boundary_visible = self.bridge.boundary_visible.load(Ordering::Acquire);
-        let deferred = !active && boundary_visible;
-        let point = cursor_position();
-        self.bridge.log(&format!(
-            "event=drag_leave id={} ready={} active={active} boundary_visible={boundary_visible} deferred={deferred} cursor={},{}",
-            self.bridge.source_id.load(Ordering::Acquire),
-            self.bridge.source_ready.load(Ordering::Acquire),
-            point.x,
-            point.y,
-        ));
-        // OLE can briefly hand the cursor back to the taskbar while the remote virtual object is
-        // still being prepared. Keep this candidate for the lifetime of the held left button;
-        // may_cross(false) cancels it as soon as the physical drag actually ends.
-        if should_cancel_after_drag_leave(active, boundary_visible) {
-            self.bridge
-                .cancel_with_reason("drag_leave_after_button_release");
-        }
-        Ok(())
-    }
-    fn Drop(
-        &self,
-        _: Ref<IDataObject>,
-        _: MODIFIERKEYS_FLAGS,
-        point: &POINTL,
-        effect: *mut DROPEFFECT,
-    ) -> Result<()> {
-        if effect.is_null() {
-            return Err(Error::from_hresult(E_POINTER));
-        }
-        unsafe {
-            effect.write(DROPEFFECT_NONE);
-            let _ = self.helper.DragLeave();
-        }
-        self.bridge.log(&format!(
-            "event=boundary_drop id={} x={} y={} ready={} active={} boundary_visible={}",
-            self.bridge.source_id.load(Ordering::Acquire),
-            point.x,
-            point.y,
-            self.bridge.source_ready.load(Ordering::Acquire),
-            self.bridge.source_active.load(Ordering::Acquire),
-            self.bridge.boundary_visible.load(Ordering::Acquire),
-        ));
-        if !self.bridge.source_active.load(Ordering::Acquire) {
-            self.bridge
-                .cancel_with_reason("boundary_drop_before_handoff");
-        }
-        Ok(())
-    }
-}
-
-struct RetainedSourceObject {
-    id: u64,
-    _object: IDataObject,
-    image: Vec<u8>,
-}
-
 pub(super) fn real_paths(object: &IDataObject) -> io::Result<Vec<PathBuf>> {
     use std::os::windows::ffi::OsStringExt;
     struct Medium(STGMEDIUM);
@@ -2335,14 +2158,42 @@ impl BoundaryMotionArm {
     }
 }
 
+#[cfg(test)]
 const fn should_cancel_after_drag_leave(source_active: bool, boundary_visible: bool) -> bool {
     !source_active && !boundary_visible
 }
 
 struct LiveSourceOffer {
-    server: SecureOfferServer,
+    // Drop the reverse tunnel before the loopback offer server: while the tunnel still holds an
+    // active connection into the server, `SecureOfferServer::stop` waits its full 5-second worker
+    // drain timeout before returning.
     _tunnel: Option<ReverseOfferTunnel>,
+    server: SecureOfferServer,
     task: Arc<DragSourceUiTask>,
+}
+
+struct LiveSourceOfferRetirer {
+    sender: mpsc::Sender<LiveSourceOffer>,
+}
+
+impl LiveSourceOfferRetirer {
+    fn start() -> io::Result<Self> {
+        let (sender, receiver) = mpsc::channel::<LiveSourceOffer>();
+        std::thread::Builder::new()
+            .name("pierdesk-drag-offer-retire".into())
+            .spawn(move || {
+                while let Ok(offer) = receiver.recv() {
+                    drop(offer);
+                }
+            })?;
+        Ok(Self { sender })
+    }
+
+    fn retire(&self, offer: LiveSourceOffer) {
+        if let Err(mpsc::SendError(offer)) = self.sender.send(offer) {
+            drop(offer);
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2364,119 +2215,75 @@ fn run_sta(
     };
     let elevated = unsafe { IsUserAnAdmin() }.as_bool();
     let thickness = capture_thickness(edge);
-    let window_handle = Rc::new(Cell::new(windows::Win32::Foundation::HWND::default()));
-    let retained_source = Rc::new(RefCell::new(None));
-    let mut capture_helper = if elevated {
-        match DragCaptureHelper::start(store.root(), edge, thickness) {
-            Ok(helper) => Some(helper),
-            Err(error) => {
-                // A missing desktop helper must not terminate the entire file-drag worker. The
-                // in-process target can still serve elevated Explorer windows and gives the user a
-                // useful fallback while keeping future reconnects alive.
-                bridge.log(&format!(
-                    "event=capture_helper_failed action=in_process_fallback error={error}"
+    let launch_mode = drag_helper_launch_mode(elevated);
+    // Always host the OLE boundary receiver in a child process created with
+    // `STARTF_FORCEOFFFEEDBACK`. An Explorer-launched tray parent (elevated or not)
+    // retains Windows' startup cursor feedback until a normal foreground window is
+    // shown, so showing an in-process topmost boundary window flashes `IDC_APPSTARTING`.
+    // Failing only this worker lets workspace reconciliation restart it without
+    // dropping the pointer runtime or falling back to an unsafe in-process window.
+    let mut capture_helper = match DragCaptureHelper::start_with_mode(
+        store.root(),
+        edge,
+        thickness,
+        launch_mode,
+    ) {
+        Ok(helper) => helper,
+        Err(error) => {
+            bridge.log(&format!(
+                    "event=capture_helper_failed action=restart_drag_worker capture={} elevated={elevated} error={error}",
+                    launch_mode.label()
                 ));
-                None
-            }
+            return Err(error);
         }
-    } else {
-        None
     };
-    let window = if capture_helper.is_none() {
-        let helper: IDropTargetHelper =
-            unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER) }
-                .map_err(io::Error::other)?;
-        let target: IDropTarget = EdgeTarget {
-            bridge: Arc::clone(bridge),
-            helper,
-            window: Rc::clone(&window_handle),
-            retained_source: Rc::clone(&retained_source),
-        }
-        .into();
-        // Only the bottom edge needs to cover a scaled taskbar. The other edges stay narrow so a
-        // browser can rearrange tabs and favorites without an invisible window covering its UI.
-        let window =
-            RegisteredBoundaryWindow::create_with_visibility(edge, thickness, &target, false)?;
-        window_handle.set(window.handle);
-        unsafe {
-            let _ = ShowWindow(window.handle, SW_HIDE);
-        }
-        Some(window)
-    } else {
-        None
-    };
-    let bounds = capture_helper.as_ref().map_or_else(
-        || window_bounds(window.as_ref().expect("local drag window").handle),
-        |helper| helper.bounds,
-    );
+    let capture_label = capture_helper.launch_mode.label();
+    let bounds = capture_helper.bounds;
     let point = cursor_position();
     let mut visible = false;
     let mut arm = BoundaryMotionArm::default();
     let mut helper_source_id = 0;
     let mut offers: Vec<LiveSourceOffer> = Vec::new();
+    let offer_retirer = LiveSourceOfferRetirer::start()?;
     bridge.log(&format!(
         "event=ready mode=file_tree_copy boundary={} elevated={} capture={} helper_pid={} helper_elevated={} window={},{},{},{} cursor={},{} helper_startup_flags={:#x}",
         boundary.label(),
         elevated,
-        if capture_helper.is_some() {
-            "desktop_shell_helper"
-        } else if elevated {
-            "in_process_fallback"
-        } else {
-            "in_process"
-        },
-        capture_helper.as_ref().map_or(0, |helper| helper.process_id),
-        capture_helper.as_ref().is_some_and(|helper| helper.elevated),
+        capture_label,
+        capture_helper.process_id,
+        capture_helper.elevated,
         bounds[0],
         bounds[1],
         bounds[2],
         bounds[3],
         point.x,
         point.y,
-        capture_helper.as_ref().map_or(0, |helper| helper.startup_flags),
+        capture_helper.startup_flags,
     ));
     while !bridge.stop.load(Ordering::Acquire) {
         pump_messages();
-        if let Some(helper) = capture_helper.as_mut() {
-            while let Some(event) = helper.poll()? {
-                match event {
-                    DragCaptureEvent::Paths(paths) => bridge.capture_helper_paths(paths),
-                    DragCaptureEvent::Rejected(reason) => bridge.log(&format!(
-                        "event=capture_rejected capture=desktop_shell_helper reason={reason}"
-                    )),
+        while let Some(event) = capture_helper.poll()? {
+            match event {
+                DragCaptureEvent::Paths(paths) => {
+                    bridge.capture_helper_paths(capture_label, paths);
                 }
+                DragCaptureEvent::Rejected(reason) => bridge.log(&format!(
+                    "event=capture_rejected capture={capture_label} reason={reason}"
+                )),
             }
-            let source_id = bridge.source_id.load(Ordering::Acquire);
-            if helper_source_id != 0 && source_id == 0 {
-                helper.clear()?;
-            }
-            helper_source_id = source_id;
         }
+        let source_id = bridge.source_id.load(Ordering::Acquire);
+        if helper_source_id != 0 && source_id == 0 {
+            capture_helper.clear()?;
+        }
+        helper_source_id = source_id;
         let requested = bridge.boundary_visible.load(Ordering::Acquire);
         let needs_motion = bridge.boundary_needs_motion.load(Ordering::Acquire);
         let cursor = cursor_position();
         let show =
             arm.update(requested, needs_motion, (cursor.x, cursor.y)) && !bridge.target_pending();
         if show != visible {
-            if let Some(helper) = capture_helper.as_mut() {
-                helper.set_visible(show)?;
-            } else if let Some(window) = &window {
-                unsafe {
-                    if show {
-                        let _ = SetWindowPos(
-                            window.handle,
-                            Some(HWND_TOPMOST),
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                        );
-                    } else {
-                        let _ = ShowWindow(window.handle, SW_HIDE);
-                    }
-                }
-            }
+            capture_helper.set_visible(show)?;
             visible = show;
             if VERBOSE_BOUNDARY_WINDOW_DIAGNOSTICS {
                 let point = cursor_position();
@@ -2508,27 +2315,6 @@ fn run_sta(
                 bridge.finish_source_return_presentation(id);
             }
         }
-        let current_source_id = bridge.source_id.load(Ordering::Acquire);
-        let source_released = bridge.source_released.load(Ordering::Acquire);
-        let release_retained = retained_source.borrow().as_ref().is_some_and(|retained| {
-            should_release_retained_source(
-                retained.id,
-                current_source_id,
-                source_released,
-                bridge.source_return_presenting.load(Ordering::Acquire),
-            )
-        });
-        if release_retained && let Some(retained) = retained_source.borrow_mut().take() {
-            bridge.log(&format!(
-                "event=source_object_released id={} reason={}",
-                retained.id,
-                if source_released {
-                    "remote_release"
-                } else {
-                    "source_terminal"
-                },
-            ));
-        }
         let paths = bridge.captured.lock().expect("drag capture lock").take();
         if let Some(paths) = paths.filter(|_| bridge.local_candidate.load(Ordering::Acquire)) {
             if offers.len() >= 4 {
@@ -2546,9 +2332,6 @@ fn run_sta(
                     let image = super::drag_image::capture(&paths[0], paths.len())?;
                     *bridge.source_image.lock().expect("source image lock") =
                         Some((bridge.source_id.load(Ordering::Acquire), image.clone()));
-                    if let Some(retained) = retained_source.borrow_mut().as_mut() {
-                        retained.image.clone_from(&image);
-                    }
                     bridge.log(&format!(
                         "event=source_image bytes={} source=shell_icon",
                         image.len()
@@ -2580,8 +2363,8 @@ fn run_sta(
                     let ui_task =
                         register_source_ui_task(id, &server.manifest(), server.control_handle());
                     offers.push(LiveSourceOffer {
-                        server,
                         _tunnel: Some(tunnel),
+                        server,
                         task: ui_task,
                     });
                 }
@@ -2658,31 +2441,46 @@ fn run_sta(
                 .lock()
                 .expect("target return lock") = TargetReturnPending::default();
         }
-        offers.retain(|offer| {
-            *offer
-                .task
-                .file_progress
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = offer.server.file_progress();
-            *offer
-                .task
-                .metrics
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = offer.server.metrics();
-            offer.server.target_location().clone_into(
-                &mut offer
+        let mut index = 0;
+        while index < offers.len() {
+            let keep = {
+                let offer = &offers[index];
+                *offer
                     .task
-                    .target_location
+                    .file_progress
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-            let terminal = offer.task.terminal.load(Ordering::Acquire) != SHELL_PENDING
-                || offer.task.control.state()
-                    == super::secure_transfer::RemoteTransferState::Cancelled;
-            !offer.server.is_idle()
-                && (!terminal || offer.task.control.idle_for() < Duration::from_secs(5))
-        });
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = offer.server.file_progress();
+                *offer
+                    .task
+                    .metrics
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = offer.server.metrics();
+                offer.server.target_location().clone_into(
+                    &mut offer
+                        .task
+                        .target_location
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                let terminal = offer.task.terminal.load(Ordering::Acquire) != SHELL_PENDING
+                    || offer.task.control.state()
+                        == super::secure_transfer::RemoteTransferState::Cancelled;
+                !offer.server.is_idle()
+                    && (!terminal || offer.task.control.idle_for() < Duration::from_secs(5))
+            };
+            if keep {
+                index += 1;
+            } else {
+                // Never join reverse tunnel / offer server threads on the drag STA thread; doing
+                // so stalls boundary-window visibility and drag_enter polling for seconds.
+                let expired = offers.swap_remove(index);
+                offer_retirer.retire(expired);
+            }
+        }
         std::thread::sleep(Duration::from_millis(8));
+    }
+    for offer in offers.drain(..) {
+        offer_retirer.retire(offer);
     }
     bridge.log("event=stopped");
     Ok(())
@@ -2751,6 +2549,7 @@ fn present_returned_source(bridge: &Arc<DragBridge>, image: &[u8], id: u64) {
     bridge.finish_source_return_presentation(id);
 }
 
+#[cfg(test)]
 const fn should_release_retained_source(
     retained_id: u64,
     current_id: u64,
@@ -2851,6 +2650,10 @@ impl Drop for NativeDragDiagnostics {
 struct RemoteDropSource {
     bridge: Arc<DragBridge>,
     diagnostics: Rc<NativeDragDiagnostics>,
+    materializer: Arc<LocalFileMaterializer>,
+    button: NativeDragButton,
+    ole_loop: Rc<Cell<Option<crate::cross_screen::OleDragLoopGuard>>>,
+    drop_hdrop_lock: Arc<AtomicU8>,
 }
 
 impl IDropSourceNotify_Impl for RemoteDropSource_Impl {
@@ -2889,8 +2692,73 @@ impl IDropSource_Impl for RemoteDropSource_Impl {
                     self.bridge.capture_target_release_point();
                     self.diagnostics
                         .record(&self.bridge, "native_target_release");
+                    let drop_accepted = self
+                        .diagnostics
+                        .effect
+                        .get()
+                        .is_some_and(|effect| effect & DROPEFFECT_COPY.0 != 0);
+                    let target_hwnd = self.diagnostics.target.get();
+                    let target_is_explorer = if target_hwnd.0.is_null() {
+                        window_process_name(unsafe { WindowFromPoint(cursor_position()) })
+                            .as_deref()
+                            .is_some_and(is_explorer_process)
+                    } else {
+                        window_process_name(target_hwnd)
+                            .as_deref()
+                            .is_some_and(is_explorer_process)
+                    };
+                    if drop_accepted {
+                        // Lock CF_HDROP policy to the target captured at release time. While a
+                        // large file hydrates, the user may move the cursor back across the
+                        // taskbar/desktop (explorer.exe) or another window; the accepting
+                        // third-party window still calls GetData(CF_HDROP) inside
+                        // IDropTarget::Drop after hydration completes.
+                        self.drop_hdrop_lock.store(
+                            if target_is_explorer {
+                                HDROP_LOCK_DENY
+                            } else {
+                                HDROP_LOCK_ALLOW
+                            },
+                            Ordering::Release,
+                        );
+                    }
+                    if drop_accepted
+                        && !target_is_explorer
+                        && self.materializer.has_unhydrated_placeholder()
+                    {
+                        // Once the user has released over an accepting third-party window, the
+                        // pointer no longer belongs to the drag loop. Release the synthetic left
+                        // button and promote the target state to TRANSFERRING before the large
+                        // network hydration runs so the user can move the cursor back to the host
+                        // immediately while hydration finishes in the background.
+                        match self.button.release() {
+                            Ok(true) => self.bridge.log(&format!(
+                                "event=ole_native_drag_button id={} state=up reason=drop_hydrate scope=system",
+                                self.bridge.target_debug_id()
+                            )),
+                            Ok(false) => {}
+                            Err(error) => self.bridge.log(&format!(
+                                "event=ole_native_drag_button_release_failed id={} reason=drop_hydrate error={error}",
+                                self.bridge.target_debug_id()
+                            )),
+                        }
+                        drop(self.ole_loop.take());
+                        self.bridge
+                            .target_state
+                            .store(TRANSFERRING, Ordering::Release);
+                        self.bridge.log(&format!(
+                            "event=local_drop_hydrate_unlocked_return id={}",
+                            self.bridge.target_debug_id()
+                        ));
+                        if let Err(error) = self.materializer.hydrate_for_drop() {
+                            self.bridge
+                                .log(&format!("event=local_drop_hydrate_abort error={error}"));
+                            return DRAGDROP_S_CANCEL;
+                        }
+                    }
                     DRAGDROP_S_DROP
                 }
+                TRANSFERRING => DRAGDROP_S_DROP,
                 _ => S_OK,
             }
         })
@@ -3320,257 +3188,32 @@ unsafe extern "system" fn drag_input_anchor_procedure(
     }
 }
 
-struct LocalDropMaterializer {
-    cache_root: PathBuf,
-    directory_name: String,
-    entries: Arc<[VirtualFileEntry]>,
-    materialized: Mutex<Option<Arc<[PathBuf]>>>,
-    served: AtomicBool,
-    bridge: Arc<DragBridge>,
+struct PlaceholderCleanupGuard {
+    materializer: Arc<LocalFileMaterializer>,
 }
 
-impl LocalDropMaterializer {
-    fn new(
-        store: &DeviceStore,
-        manifest: &super::secure_transfer::OfferManifest,
-        entries: Vec<VirtualFileEntry>,
-        bridge: &Arc<DragBridge>,
-    ) -> Self {
-        Self {
-            cache_root: store.root().join("drag-cache"),
-            directory_name: format!("drop-{}-p{}", manifest.offer_id, std::process::id()),
-            entries: Arc::from(entries),
-            materialized: Mutex::new(None),
-            served: AtomicBool::new(false),
-            bridge: Arc::clone(bridge),
-        }
-    }
-
-    // `CF_HDROP` for a target. Before the drop it never downloads: hovering over an application
-    // that requests local paths during DragEnter (Chromium/WebView2, including Pierdesk's own
-    // windows) used to download the whole offer inside the OLE modal loop, and a background
-    // prefetch still surfaced as a transfer before the user released. Only a released drop
-    // fetches the files.
-    fn hdrop_paths(&self, dropping: bool) -> io::Result<Arc<[PathBuf]>> {
-        let paths = if dropping {
-            self.paths()?
-        } else {
-            let cached = match self.materialized.try_lock() {
-                Ok(cached) => cached.as_ref().map(Arc::clone),
-                Err(std::sync::TryLockError::WouldBlock) => None,
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    return Err(io::Error::other("local drop materializer was poisoned"));
-                }
-            };
-            let Some(paths) = cached else {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "local drop files are fetched only after the drop",
-                ));
-            };
-            paths
-        };
-        self.served.store(true, Ordering::Release);
-        Ok(paths)
-    }
-
-    fn paths(&self) -> io::Result<Arc<[PathBuf]>> {
-        let mut cached = self
-            .materialized
-            .lock()
-            .map_err(|_| io::Error::other("local drop materializer was poisoned"))?;
-        if let Some(paths) = cached.as_ref() {
-            return Ok(Arc::clone(paths));
-        }
-
-        fs::create_dir_all(&self.cache_root)?;
-        cleanup_local_drop_cache(&self.cache_root);
-        let root = self.allocate_root()?;
-        let started = Instant::now();
-        let total_bytes = self
-            .entries
-            .iter()
-            .filter(|entry| !entry.descriptor.is_directory())
-            .map(|entry| entry.descriptor.size)
-            .sum::<u64>();
-        self.bridge.log(&format!(
-            "event=local_drop_materialize_start files={} bytes={} root={}",
-            self.entries
-                .iter()
-                .filter(|entry| !entry.descriptor.is_directory())
-                .count(),
-            total_bytes,
-            root.display()
-        ));
-
-        let result = self.materialize_into(&root);
-        let paths = match result {
-            Ok(paths) => paths,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&root);
-                self.bridge.log(&format!(
-                    "event=local_drop_materialize_failed elapsed_ms={} error={error}",
-                    started.elapsed().as_millis()
-                ));
-                return Err(error);
-            }
-        };
-        self.bridge.log(&format!(
-            "event=local_drop_materialize_complete files={} bytes={} elapsed_ms={} paths={}",
-            self.entries
-                .iter()
-                .filter(|entry| !entry.descriptor.is_directory())
-                .count(),
-            total_bytes,
-            started.elapsed().as_millis(),
-            paths.len()
-        ));
-        let paths: Arc<[PathBuf]> = Arc::from(paths);
-        *cached = Some(Arc::clone(&paths));
-        Ok(paths)
-    }
-
-    /// True only when a target actually received local paths, not merely when a background
-    /// prefetch completed; an Explorer virtual-file drop must keep its STA alive regardless.
-    fn served(&self) -> bool {
-        self.served.load(Ordering::Acquire)
-    }
-
-    fn allocate_root(&self) -> io::Result<PathBuf> {
-        for suffix in 0..100_u32 {
-            let name = if suffix == 0 {
-                self.directory_name.clone()
-            } else {
-                format!("{}-{suffix}", self.directory_name)
-            };
-            let path = self.cache_root.join(name);
-            match fs::create_dir(&path) {
-                Ok(()) => return Ok(path),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate an isolated local drop cache directory",
-        ))
-    }
-
-    fn materialize_into(&self, root: &Path) -> io::Result<Vec<PathBuf>> {
-        for entry in self
-            .entries
-            .iter()
-            .filter(|entry| entry.descriptor.is_directory())
-        {
-            fs::create_dir_all(root.join(entry.descriptor.file_name.as_ref()))?;
-        }
-        for entry in self
-            .entries
-            .iter()
-            .filter(|entry| !entry.descriptor.is_directory())
-        {
-            let path = root.join(entry.descriptor.file_name.as_ref());
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            let source_factory = entry.source_factory.as_ref().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "file entry has no content source",
-                )
-            })?;
-            let source = source_factory();
-            if source.len() != entry.descriptor.size {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "local drop source size does not match its authenticated manifest",
-                ));
-            }
-            let mut offset = 0_u64;
-            let mut buffer = vec![0_u8; LOCAL_DROP_READ_BUFFER];
-            while offset < entry.descriptor.size {
-                let remaining = entry.descriptor.size - offset;
-                let requested = usize::try_from(remaining)
-                    .unwrap_or(usize::MAX)
-                    .min(buffer.len());
-                let read = source
-                    .read_at(offset, &mut buffer[..requested])
-                    .map_err(|error| io::Error::other(error.to_string()))?;
-                if read == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "remote file ended before its authenticated size",
-                    ));
-                }
-                file.write_all(&buffer[..read])?;
-                offset = offset
-                    .checked_add(u64::try_from(read).map_err(io::Error::other)?)
-                    .ok_or_else(|| io::Error::other("local drop file offset overflow"))?;
-            }
-            file.flush()?;
-            let mut eof_probe = [0_u8; 1];
-            let eof = source
-                .read_at(entry.descriptor.size, &mut eof_probe)
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            if eof != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "remote file exceeded its authenticated size",
-                ));
-            }
-        }
-
-        let mut seen = HashSet::new();
-        let mut paths = Vec::new();
-        for entry in self.entries.iter() {
-            let top = entry
-                .descriptor
-                .file_name
-                .split('\\')
-                .next()
-                .ok_or_else(|| io::Error::other("empty local drop path"))?;
-            let key = top.to_lowercase();
-            if seen.insert(key) {
-                paths.push(root.join(top));
-            }
-        }
-        if paths.is_empty() || paths.iter().any(|path| !path.exists()) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "local drop paths did not materialize completely",
-            ));
-        }
-        Ok(paths)
+impl Drop for PlaceholderCleanupGuard {
+    fn drop(&mut self) {
+        self.materializer.cleanup_unhydrated();
     }
 }
 
-fn cleanup_local_drop_cache(cache_root: &Path) {
-    let cutoff = SystemTime::now()
-        .checked_sub(LOCAL_DROP_CACHE_RETENTION)
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let Ok(entries) = fs::read_dir(cache_root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let managed = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("drop-"));
-        let expired = entry
-            .metadata()
-            .ok()
-            .filter(std::fs::Metadata::is_dir)
-            .and_then(|metadata| metadata.modified().ok())
-            .is_some_and(|modified| modified < cutoff);
-        if managed && expired {
-            let _ = fs::remove_dir_all(path);
-        }
-    }
+fn new_drag_materializer(
+    store: &DeviceStore,
+    manifest: &super::secure_transfer::OfferManifest,
+    entries: Vec<VirtualFileEntry>,
+    bridge: &Arc<DragBridge>,
+) -> LocalFileMaterializer {
+    let logger_bridge = Arc::clone(bridge);
+    let logger: MaterializeLogger = Arc::new(move |line| logger_bridge.log(line));
+    LocalFileMaterializer::new(
+        store.root().join("drag-cache"),
+        "drop-",
+        format!("drop-{}-p{}", manifest.offer_id, std::process::id()),
+        entries,
+        "local_drop",
+        Some(logger),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3634,30 +3277,45 @@ fn target_drag(
         })
         .collect();
     let probe = Arc::new(ProbeState::quiet());
-    let materializer = Arc::new(LocalDropMaterializer::new(
-        store,
-        &manifest,
-        entries.clone(),
-        bridge,
-    ));
+    let materializer = Arc::new(new_drag_materializer(store, &manifest, entries.clone(), bridge));
+    let _placeholder_cleanup = PlaceholderCleanupGuard {
+        materializer: Arc::clone(&materializer),
+    };
     let provider_materializer = Arc::clone(&materializer);
     let provider_bridge = Arc::clone(bridge);
     let hdrop_provider: HdropProvider = Arc::new(move || {
         let state = provider_bridge.target_state.load(Ordering::Acquire);
-        provider_materializer.hdrop_paths(state == RELEASED || state == TRANSFERRING)
+        provider_materializer.hdrop_paths_for_drag(state == RELEASED || state == TRANSFERRING)
     });
     let gate_bridge = Arc::clone(bridge);
     let last_policy = Arc::new(AtomicU8::new(0));
+    let drop_hdrop_lock = Arc::new(AtomicU8::new(HDROP_LOCK_UNSET));
+    let gate_lock = Arc::clone(&drop_hdrop_lock);
     let hdrop_gate: HdropGate = Arc::new(move || {
+        match gate_lock.load(Ordering::Acquire) {
+            HDROP_LOCK_ALLOW => {
+                if last_policy.swap(3, Ordering::AcqRel) != 3 {
+                    gate_bridge.log(&format!(
+                        "event=hdrop_policy id={id} offered=true locked=drop_target"
+                    ));
+                }
+                return true;
+            }
+            HDROP_LOCK_DENY => {
+                if last_policy.swap(4, Ordering::AcqRel) != 4 {
+                    gate_bridge.log(&format!(
+                        "event=hdrop_policy id={id} offered=false locked=explorer_drop_target"
+                    ));
+                }
+                return false;
+            }
+            _ => {}
+        }
         // Explorer (desktop, folder windows, taskbar) consumes FileGroupDescriptorW/FileContents
         // natively: it streams after the drop with its own progress UI and reliably calls
-        // EndOperation. Given CF_HDROP it instead requests the paths during DragEnter, which
-        // downloads the whole offer inside the OLE modal loop, and then never ends the async
-        // operation. Keep the local-path form for applications that need it.
-        let process = window_process_name(unsafe { WindowFromPoint(cursor_position()) });
-        let offered = !process
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("explorer.exe"));
+        // EndOperation. Pierdesk's own windows (including hosted WebView2 panels) never accept
+        // dropped files and must not trigger hover materialization either.
+        let (offered, process) = drag_hdrop_policy(unsafe { WindowFromPoint(cursor_position()) });
         let policy = if offered { 1 } else { 2 };
         if last_policy.swap(policy, Ordering::AcqRel) != policy {
             gate_bridge.log(&format!(
@@ -3741,9 +3399,16 @@ fn target_drag(
             "event=ole_native_drag_button id={id} state=down scope=system anchor=owned anchor_acknowledged={}",
             native_input.press_acknowledged(),
         ));
+        let ole_loop = Rc::new(Cell::new(Some(
+            crate::cross_screen::OleDragLoopGuard::enter(),
+        )));
         let source: IDropSource = RemoteDropSource {
             bridge: Arc::clone(bridge),
             diagnostics: Rc::clone(&diagnostics),
+            materializer: Arc::clone(&materializer),
+            button: native_input.controller(),
+            ole_loop: Rc::clone(&ole_loop),
+            drop_hdrop_lock: Arc::clone(&drop_hdrop_lock),
         }
         .into();
         let done = Arc::new(AtomicBool::new(false));
@@ -3756,19 +3421,21 @@ fn target_drag(
             let mut previous_state = wake_bridge.target_state.load(Ordering::Acquire);
             let mut initial_wake = true;
             while !done_worker.load(Ordering::Acquire) {
-                if native_started.elapsed() > Duration::from_mins(2) {
+                if wake_bridge.target_state.load(Ordering::Acquire) < TRANSFERRING
+                    && native_started.elapsed() > Duration::from_mins(2)
+                {
                     wake_bridge.target_state.store(CANCELLED, Ordering::Release);
                 }
                 let state = wake_bridge.target_state.load(Ordering::Acquire);
                 if initial_wake || state != previous_state {
-                    if matches!(state, RELEASED | CANCELLED) {
+                    if matches!(state, RELEASED | TRANSFERRING | CANCELLED) {
                         match wake_button.release() {
                             Ok(true) => wake_bridge.log(&format!(
                                 "event=ole_native_drag_button id={id} state=up reason={} scope=system",
-                                if state == RELEASED {
-                                    "remote_release"
-                                } else {
+                                if state == CANCELLED {
                                     "remote_cancel"
+                                } else {
+                                    "remote_release"
                                 }
                             )),
                             Ok(false) => {}
@@ -3792,9 +3459,8 @@ fn target_drag(
             }
         });
         let mut effect = DROPEFFECT_NONE;
-        let ole_loop = crate::cross_screen::OleDragLoopGuard::enter();
         let result = unsafe { DoDragDrop(&object, &source, DROPEFFECT_COPY, &raw mut effect) };
-        drop(ole_loop);
+        drop(ole_loop.take());
         match native_input.release_after_native_end() {
             Ok(true) => bridge.log(&format!(
                 "event=ole_native_drag_button id={id} state=up reason=native_end_guard scope=system"
@@ -3910,6 +3576,10 @@ fn target_drag(
         ));
     }
     if result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY {
+        let drop_target_is_explorer = desktop_drop
+            || window_process_name(unsafe { WindowFromPoint(drop_point) })
+                .as_deref()
+                .is_some_and(is_explorer_process);
         let mut timed_out = false;
         let mut desktop_position_checks = 0_u8;
         loop {
@@ -3988,7 +3658,10 @@ fn target_drag(
                 // InOperation flag converges. The callback itself is terminal by contract.
                 break;
             }
-            if materializer.served() && transfer_started.elapsed() >= LOCAL_DROP_SHELL_SETTLE {
+            if materializer.served()
+                && !drop_target_is_explorer
+                && transfer_started.elapsed() >= LOCAL_DROP_SHELL_SETTLE
+            {
                 bridge.log(&format!(
                     "event=local_drop_shell_settled id={id} reason=no_end_operation elapsed_ms={}",
                     transfer_started.elapsed().as_millis()
@@ -3999,7 +3672,7 @@ fn target_drag(
         }
         if !timed_out {
             let mut shell = probe.shell_transfer();
-            if materializer.served() && !shell.async_ended {
+            if materializer.served() && !drop_target_is_explorer && !shell.async_ended {
                 // The target copied from complete local files; judge it like a synchronous
                 // target instead of waiting for an EndOperation that will not arrive.
                 shell.async_started = false;
@@ -4435,21 +4108,6 @@ fn restore_and_position_received_desktop_items(
     Ok((layout.items.len(), received.items.len()))
 }
 
-fn window_process_name(window: HWND) -> Option<String> {
-    if window.0.is_null() {
-        return None;
-    }
-    let mut process_id = 0_u32;
-    unsafe { GetWindowThreadProcessId(window, Some(&raw mut process_id)) };
-    if process_id == 0 {
-        return None;
-    }
-    let image = process_image(process_id).ok()?;
-    image
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-}
-
 fn window_class(window: windows::Win32::Foundation::HWND) -> String {
     let mut buffer = [0_u16; 128];
     let length = unsafe { GetClassNameW(window, &mut buffer) };
@@ -4519,6 +4177,9 @@ fn variant_i32(value: i32) -> VARIANT {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::SystemTime;
+
     use super::super::product::{ProductTransferDirection, ProductTransferState};
     use super::*;
     use crate::clipboard::data_object::VirtualFileDescriptor;
@@ -4706,7 +4367,7 @@ mod tests {
             ),
         ];
         let materializer =
-            LocalDropMaterializer::new(&store, &offered.manifest(), entries, &Arc::new(bridge()));
+            new_drag_materializer(&store, &offered.manifest(), entries, &Arc::new(bridge()));
 
         let first = materializer.paths().unwrap();
         let second = materializer.paths().unwrap();
@@ -4720,7 +4381,7 @@ mod tests {
     }
 
     #[test]
-    fn hovering_hdrop_request_never_downloads_and_drop_fetches() {
+    fn hovering_hdrop_request_returns_sparse_placeholder_and_drop_hydrates_real_bytes() {
         let nonce = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -4730,10 +4391,15 @@ mod tests {
             std::process::id()
         ));
         let store = DeviceStore::new(&store_root);
-        let source: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&b"payload"[..]));
+
+        let payload = b"real-file-bytes-delivered-on-drop";
+        let source: Arc<dyn ReadAtSource> = Arc::new(MemorySource::new(&payload[..]));
         let offered = SecureOfferedFile::new_tree(
             vec![(
-                VirtualFileDescriptor::basic(Arc::from("视频.mp4"), 7),
+                VirtualFileDescriptor::basic(
+                    Arc::from("逐跳之间 v1.pdf"),
+                    u64::try_from(payload.len()).unwrap(),
+                ),
                 Some(Arc::clone(&source)),
             )],
             Duration::from_secs(30),
@@ -4743,25 +4409,35 @@ mod tests {
             offered.manifest().entries[0].descriptor.clone(),
             Arc::new(move || Arc::clone(&source)),
         )];
-        let materializer = Arc::new(LocalDropMaterializer::new(
+        let materializer = Arc::new(new_drag_materializer(
             &store,
             &offered.manifest(),
             entries,
             &Arc::new(bridge()),
         ));
 
-        // While the button is held a request neither waits nor starts a download.
-        let error = materializer.hdrop_paths(false).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        // Hover returns a real path with the authenticated size immediately without reading the
+        // remote source, so applications such as WeChat accept the drag on frame 1.
+        let hovered = materializer.hdrop_paths_for_drag(false).unwrap();
+        assert!(materializer.has_unhydrated_placeholder());
         assert!(!materializer.served());
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(materializer.materialized.lock().unwrap().is_none());
-        // Only the drop fetches the files; later requests reuse them.
-        let dropped = materializer.hdrop_paths(true).unwrap();
+        assert!(!materializer.is_materialized());
+        assert_eq!(
+            fs::metadata(&hovered[0]).unwrap().len(),
+            u64::try_from(payload.len()).unwrap()
+        );
+
+        // Releasing hydrates the exact same path in place with the full remote bytes.
+        let dropped = materializer.hydrate_for_drop().unwrap();
+        assert!(Arc::ptr_eq(&hovered, &dropped));
+        assert!(!materializer.has_unhydrated_placeholder());
         assert!(materializer.served());
-        assert_eq!(fs::read(&dropped[0]).unwrap(), b"payload");
-        let hovered = materializer.hdrop_paths(false).unwrap();
-        assert!(Arc::ptr_eq(&dropped, &hovered));
+        assert!(materializer.is_materialized());
+        assert_eq!(fs::read(&dropped[0]).unwrap(), payload);
+
+        // Subsequent queries reuse the hydrated file without re-downloading.
+        let reused = materializer.hdrop_paths_for_drag(false).unwrap();
+        assert!(Arc::ptr_eq(&dropped, &reused));
 
         fs::remove_dir_all(store_root).unwrap();
     }
@@ -4992,9 +4668,23 @@ mod tests {
         bridge.receive(message(1, DragMessage::PREPARE), true);
         bridge.receive(message(1, DragMessage::RELEASE), false);
         assert_eq!(bridge.target_state.load(Ordering::Acquire), CANCELLED);
+        let drop_hdrop_lock = Arc::new(AtomicU8::new(HDROP_LOCK_UNSET));
         let source: IDropSource = RemoteDropSource {
             bridge: Arc::clone(&bridge),
             diagnostics: Rc::default(),
+            materializer: Arc::new(LocalFileMaterializer::new(
+                PathBuf::new(),
+                "drop-",
+                "test".to_owned(),
+                Vec::new(),
+                "local_drop",
+                None,
+            )),
+            button: NativeDragButton {
+                active: Arc::new(AtomicBool::new(false)),
+            },
+            ole_loop: Rc::new(Cell::new(None)),
+            drop_hdrop_lock: Arc::clone(&drop_hdrop_lock),
         }
         .into();
         assert_eq!(
@@ -5018,6 +4708,11 @@ mod tests {
         assert_eq!(
             unsafe { source.QueryContinueDrag(false, MODIFIERKEYS_FLAGS(0)) },
             DRAGDROP_S_DROP
+        );
+        assert_ne!(
+            drop_hdrop_lock.load(Ordering::Acquire),
+            HDROP_LOCK_UNSET,
+            "accepting release must freeze the CF_HDROP gate before pointer movement can drift"
         );
         assert!(bridge.target_release_point.lock().unwrap().is_some());
         assert_eq!(
@@ -5820,5 +5515,88 @@ mod tests {
         assert!(!bridge.may_return(true));
         assert_eq!(bridge.poll(), Some(message(61, DragMessage::CANCEL)));
         assert!(bridge.take_failed_reverse_left_restore());
+    }
+
+    #[test]
+    fn drag_offer_retirer_drops_expired_source_offers_off_the_sta_thread() {
+        let store_root = std::env::temp_dir().join(format!(
+            "pierdesk-offer-retire-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = DeviceStore::new(&store_root);
+        let identity = store.load_or_create_identity().unwrap().identity;
+        let peer_store = DeviceStore::new(store_root.join("peer"));
+        let peer_identity = peer_store.load_or_create_identity().unwrap().identity;
+        store
+            .trust_peer(
+                peer_identity.certificate_der().to_vec(),
+                peer_identity.fingerprint(),
+                "peer",
+            )
+            .unwrap();
+        let tls = crate::security::PinnedTlsServer::new(
+            &identity,
+            peer_identity.certificate_der().to_vec(),
+            peer_identity.fingerprint(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let offered = SecureOfferedFile::generated(
+            Arc::<str>::from("retire-nonblocking.bin"),
+            64,
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let server = SecureOfferServer::start(
+            "127.0.0.1:0".parse().unwrap(),
+            tls,
+            offered,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let task = register_source_ui_task(901, &server.manifest(), server.control_handle());
+        let retirer = LiveSourceOfferRetirer::start().unwrap();
+        let started = Instant::now();
+        retirer.retire(LiveSourceOffer {
+            _tunnel: None,
+            server,
+            task,
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "retiring a finished drag offer must return immediately on the STA thread"
+        );
+        drop(retirer);
+        let _ = fs::remove_dir_all(store_root);
+    }
+
+    #[test]
+    fn promoting_released_target_to_transferring_unlocks_pointer_return_without_cancelling() {
+        let bridge = bridge();
+        bridge.receive_for_route(
+            DragMessage {
+                id: 77,
+                kind: DragMessage::PREPARE,
+                port: 45234,
+            },
+            true,
+            false,
+        );
+        bridge.receive_for_route(message(77, DragMessage::ACTIVATE), true, false);
+        bridge.receive_for_route(message(77, DragMessage::RELEASE), true, false);
+        assert_eq!(bridge.target_state.load(Ordering::Acquire), RELEASED);
+        assert!(bridge.target_pending());
+        assert!(!bridge.may_return(false));
+
+        bridge.target_state.store(TRANSFERRING, Ordering::Release);
+        assert!(!bridge.target_pending());
+        assert!(bridge.may_return(false));
+        assert!(!bridge.suspend_target_for_source_return());
+        assert_eq!(bridge.target_state.load(Ordering::Acquire), TRANSFERRING);
     }
 }
