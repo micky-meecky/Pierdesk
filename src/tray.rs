@@ -16,6 +16,10 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE,
     HINSTANCE, HWND, LPARAM, LRESULT, POINT, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, RGBQUAD, SelectObject,
+};
 use windows::Win32::System::Console::FreeConsole;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
@@ -35,17 +39,18 @@ use windows::Win32::UI::Shell::{
     ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CREATESTRUCTW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW,
-    GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON,
-    HWND_MESSAGE, IDI_APPLICATION, IDI_INFORMATION, IDYES, KillTimer, LR_DEFAULTCOLOR, LoadIconW,
-    MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_YESNO,
-    MENU_ITEM_FLAGS, MF_CHECKED, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
-    SM_CYSMICON, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnregisterClassW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_ENDSESSION, WM_HOTKEY,
-    WM_LBUTTONDBLCLK, WM_NCCREATE, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    AppendMenuW, CREATESTRUCTW, CreateIconFromResourceEx, CreateIconIndirect, CreatePopupMenu,
+    CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
+    DispatchMessageW, DrawIconEx, FindWindowExW, GWLP_USERDATA, GetCursorPos, GetMessageW,
+    GetSystemMetrics, GetWindowLongPtrW, HICON, HWND_MESSAGE, ICONINFO, IDI_APPLICATION,
+    IDI_INFORMATION, IDYES, KillTimer, LR_DEFAULTCOLOR, LoadIconW, MB_ICONERROR,
+    MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_SETFOREGROUND, MB_YESNO, MENU_ITEM_FLAGS,
+    MF_CHECKED, MF_DISABLED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON,
+    SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_ENDSESSION, WM_HOTKEY, WM_LBUTTONDBLCLK,
+    WM_NCCREATE, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 use windows_core::{PCWSTR, w};
 
@@ -544,6 +549,150 @@ impl OwnedIcon {
             owned: false,
         })
     }
+
+    fn load_with_badge(&self) -> io::Result<Self> {
+        // SAFETY: reading small icon system metrics is thread-safe and side-effect free.
+        let width = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+        let height = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+        // SAFETY: creating a memory DC compatible with the screen is process-local.
+        let hdc = unsafe { CreateCompatibleDC(None) };
+        if hdc.is_invalid() {
+            return Err(io::Error::last_os_error());
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).unwrap_or(0),
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [RGBQUAD::default()],
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `bmi` describes a valid 32-bit top-down BGRA DIB; `bits` receives the backing pointer.
+        let color_bitmap = match unsafe {
+            CreateDIBSection(Some(hdc), &raw const bmi, DIB_RGB_COLORS, &raw mut bits, None, 0)
+        } {
+            Ok(bitmap) if !bitmap.is_invalid() && !bits.is_null() => bitmap,
+            Ok(bitmap) => {
+                if !bitmap.is_invalid() {
+                    // SAFETY: releasing our newly created bitmap.
+                    let _ = unsafe { DeleteObject(HGDIOBJ(bitmap.0)) };
+                }
+                // SAFETY: releasing our memory DC.
+                let _ = unsafe { DeleteDC(hdc) };
+                return Err(io::Error::other("CreateDIBSection returned null pixel buffer"));
+            }
+            Err(error) => {
+                // SAFETY: releasing our memory DC.
+                let _ = unsafe { DeleteDC(hdc) };
+                return Err(windows_error(error));
+            }
+        };
+
+        let pixel_count = usize::try_from(width).unwrap_or(16) * usize::try_from(height).unwrap_or(16);
+        // SAFETY: `bits` points to `pixel_count` 32-bit pixels owned by `color_bitmap`.
+        unsafe {
+            std::slice::from_raw_parts_mut(bits.cast::<u32>(), pixel_count).fill(0);
+        }
+        // SAFETY: selecting `color_bitmap` into our memory DC and drawing the base icon.
+        let previous = unsafe { SelectObject(hdc, HGDIOBJ(color_bitmap.0)) };
+        let draw_result = unsafe {
+            DrawIconEx(hdc, 0, 0, self.handle, width, height, 0, None, DI_NORMAL)
+        };
+        // SAFETY: restore previous GDI selection before reading/modifying the DIB pixels.
+        let _ = unsafe { SelectObject(hdc, previous) };
+        if let Err(error) = draw_result {
+            // SAFETY: clean up GDI objects on failure.
+            let _ = unsafe { DeleteObject(HGDIOBJ(color_bitmap.0)) };
+            let _ = unsafe { DeleteDC(hdc) };
+            return Err(windows_error(error));
+        }
+
+        // SAFETY: `color_bitmap` is no longer selected into any DC; its pixel buffer is uniquely accessible.
+        let pixels = unsafe { std::slice::from_raw_parts_mut(bits.cast::<u32>(), pixel_count) };
+        draw_update_badge_dot(
+            pixels,
+            usize::try_from(width).unwrap_or(16),
+            usize::try_from(height).unwrap_or(16),
+        );
+
+        // SAFETY: creating a monochrome mask bitmap matching the color bitmap dimensions.
+        let mask_bitmap = unsafe { CreateBitmap(width, height, 1, 1, None) };
+        let icon_result = if mask_bitmap.is_invalid() {
+            Err(io::Error::last_os_error())
+        } else {
+            let info = ICONINFO {
+                fIcon: true.into(),
+                xHotspot: 0,
+                yHotspot: 0,
+                hbmMask: mask_bitmap,
+                hbmColor: color_bitmap,
+            };
+            // SAFETY: `info` references valid live bitmaps; Windows copies them into the returned HICON.
+            unsafe { CreateIconIndirect(&raw const info) }.map_err(windows_error)
+        };
+
+        if !mask_bitmap.is_invalid() {
+            // SAFETY: releasing temporary mask bitmap.
+            let _ = unsafe { DeleteObject(HGDIOBJ(mask_bitmap.0)) };
+        }
+        // SAFETY: releasing temporary color bitmap and memory DC.
+        let _ = unsafe { DeleteObject(HGDIOBJ(color_bitmap.0)) };
+        let _ = unsafe { DeleteDC(hdc) };
+
+        Ok(Self {
+            handle: icon_result?,
+            owned: true,
+        })
+    }
+}
+
+fn draw_update_badge_dot(pixels: &mut [u32], width: usize, height: usize) {
+    let w = f64::from(u32::try_from(width).unwrap_or(16));
+    let inner_r = (w * 0.22).max(2.8);
+    let outer_r = inner_r + 1.1;
+    let cx = w - outer_r - 0.4;
+    let cy = outer_r + 0.4;
+    for y in 0..height {
+        let py = f64::from(u32::try_from(y).unwrap_or(0)) + 0.5;
+        for x in 0..width {
+            let px = f64::from(u32::try_from(x).unwrap_or(0)) + 0.5;
+            let dist = (px - cx).hypot(py - cy);
+            let outer_cov = (outer_r + 0.5 - dist).clamp(0.0, 1.0);
+            if outer_cov <= 0.0 {
+                continue;
+            }
+            let inner_cov = (inner_r + 0.5 - dist).clamp(0.0, 1.0);
+            let idx = y * width + x;
+            let mut pixel = pixels[idx];
+            // Light outer ring so the badge stays crisp on dark or colored taskbars.
+            pixel = blend_bgra_premul(pixel, 255.0, 255.0, 255.0, outer_cov * 0.92);
+            // Bright red notification dot (#EF4444).
+            if inner_cov > 0.0 {
+                pixel = blend_bgra_premul(pixel, 239.0, 68.0, 68.0, inner_cov);
+            }
+            pixels[idx] = pixel;
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn blend_bgra_premul(dst: u32, sr: f64, sg: f64, sb: f64, sa: f64) -> u32 {
+    let da = f64::from((dst >> 24) & 0xFF) / 255.0;
+    let dr = f64::from((dst >> 16) & 0xFF);
+    let dg = f64::from((dst >> 8) & 0xFF);
+    let db = f64::from(dst & 0xFF);
+    let inv = 1.0 - sa;
+    let out_a = (sa + da * inv).clamp(0.0, 1.0);
+    let out_r = (sr * sa + dr * inv).clamp(0.0, 255.0).round() as u32;
+    let out_g = (sg * sa + dg * inv).clamp(0.0, 255.0).round() as u32;
+    let out_b = (sb * sa + db * inv).clamp(0.0, 255.0).round() as u32;
+    let out_a_byte = (out_a * 255.0).round().clamp(0.0, 255.0) as u32;
+    (out_a_byte << 24) | (out_r << 16) | (out_g << 8) | out_b
 }
 
 impl Drop for OwnedIcon {
@@ -574,6 +723,8 @@ struct TrayState {
     log_path: PathBuf,
     active_log_path: PathBuf,
     icon: OwnedIcon,
+    update_badge_icon: Option<OwnedIcon>,
+    update_badge_active: bool,
     taskbar_created: u32,
     discovery: Option<DiscoveryRuntime>,
     discovery_error: Option<String>,
@@ -794,6 +945,11 @@ impl TrayState {
                 None
             }
         };
+        let icon = OwnedIcon::load()?;
+        let update_badge_icon = icon.load_with_badge().ok();
+        let update_badge_active = auto_update
+            .as_ref()
+            .is_some_and(|runtime| runtime.snapshot().has_available_update());
         Ok(Self {
             screenshot: crate::screenshot::Manager::new(store.root()),
             license,
@@ -805,7 +961,9 @@ impl TrayState {
             store,
             log_path,
             active_log_path,
-            icon: OwnedIcon::load()?,
+            icon,
+            update_badge_icon,
+            update_badge_active,
             taskbar_created,
             discovery,
             discovery_error,
@@ -1734,6 +1892,34 @@ impl TrayState {
         let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &raw const data) };
     }
 
+    fn current_base_icon(&self) -> HICON {
+        if self.update_badge_active
+            && let Some(badge) = self.update_badge_icon.as_ref()
+        {
+            return badge.handle;
+        }
+        self.icon.handle
+    }
+
+    fn sync_update_badge_icon(&mut self, window: HWND) {
+        let should_show = self
+            .auto_update
+            .as_ref()
+            .is_some_and(|runtime| runtime.snapshot().has_available_update());
+        if should_show == self.update_badge_active {
+            return;
+        }
+        self.update_badge_active = should_show;
+        if !self.tray_icon_added() || self.ssh_attention_active {
+            return;
+        }
+        let mut data = self.notify_data(window, &self.tooltip_text());
+        data.uFlags = NIF_ICON;
+        data.hIcon = self.current_base_icon();
+        // SAFETY: `data` identifies the live tray icon with an owned valid HICON.
+        let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const data) };
+    }
+
     fn notify_data(&self, window: HWND, tooltip: &str) -> NOTIFYICONDATAW {
         let mut data = NOTIFYICONDATAW {
             cbSize: u32::try_from(size_of::<NOTIFYICONDATAW>()).unwrap_or(u32::MAX),
@@ -1741,15 +1927,34 @@ impl TrayState {
             uID: TRAY_ICON_ID,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: TRAY_CALLBACK_MESSAGE,
-            hIcon: self.icon.handle,
+            hIcon: self.current_base_icon(),
             ..Default::default()
         };
         copy_wide_to_fixed(tooltip, &mut data.szTip);
         data
     }
 
-    #[allow(clippy::too_many_lines)]
     fn tooltip_text(&self) -> String {
+        let base = self.base_tooltip_text();
+        let Some(update) = self.auto_update.as_ref().map(AutoUpdateRuntime::snapshot) else {
+            return base;
+        };
+        if !update.has_available_update() {
+            return base;
+        }
+        let Some(version) = update.available_version.as_deref() else {
+            return base;
+        };
+        let suffix = if self.ui_language == UiLanguage::English {
+            format!("\r\nUpdate v{version} available")
+        } else {
+            format!("\r\n有新版本 v{version}")
+        };
+        format!("{base}{suffix}")
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn base_tooltip_text(&self) -> String {
         let english = self.ui_language == UiLanguage::English;
         if let Some(issue) = self.active_network_issue() {
             return format!(
@@ -2524,6 +2729,7 @@ impl TrayState {
         self.update_ssh_notifications(command_target);
         self.log_network_path_status();
         self.log_cross_screen_status();
+        self.sync_update_badge_icon(command_target);
         if let Err(error) = self.update_icon_tip(command_target) {
             let _ = append_log(
                 &self.log_path,
@@ -2808,7 +3014,7 @@ impl TrayState {
         data.hIcon = if self.ssh_attention_phase {
             self.ssh_attention_icon
         } else {
-            self.icon.handle
+            self.current_base_icon()
         };
         // SAFETY: both icon handles are live shared/owned resources and data names our tray icon.
         if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const data) }.as_bool() {
@@ -2827,7 +3033,7 @@ impl TrayState {
         self.ssh_attention_phase = false;
         let mut data = self.notify_data(window, &self.tooltip_text());
         data.uFlags = NIF_ICON;
-        data.hIcon = self.icon.handle;
+        data.hIcon = self.current_base_icon();
         // SAFETY: the application icon remains live for the lifetime of TrayState.
         let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const data) };
         let _ = append_log(
@@ -6529,5 +6735,13 @@ mod tests {
         let tooltip = cross_screen_tooltip(&snapshot);
         assert!(tooltip.contains("跨屏正在重连"));
         assert!(tooltip.contains("请检查防火墙"));
+    }
+
+    #[test]
+    fn tray_update_badge_icon_builds_cleanly() {
+        let base = super::OwnedIcon::load().unwrap();
+        let badged = base.load_with_badge().unwrap();
+        assert!(badged.owned);
+        assert!(!badged.handle.is_invalid());
     }
 }

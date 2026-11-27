@@ -44,7 +44,7 @@ const MANIFEST_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_mins(1);
 const STARTUP_CHECK_DELAY: Duration = Duration::from_secs(90);
-const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_hours(4);
+const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_hours(24);
 const MAX_JITTER_SECONDS: u64 = 30 * 60;
 const USER_AGENT: &str = "Pierdesk-Updater";
 
@@ -229,6 +229,16 @@ impl AutoUpdateSnapshot {
             self.phase,
             AutoUpdatePhase::ReadyToInstall | AutoUpdatePhase::NeedsElevation
         ) && self.staged.is_some()
+    }
+
+    #[must_use]
+    pub fn has_available_update(&self) -> bool {
+        matches!(
+            self.phase,
+            AutoUpdatePhase::UpdateAvailable
+                | AutoUpdatePhase::ReadyToInstall
+                | AutoUpdatePhase::NeedsElevation
+        ) && self.available_version.is_some()
     }
 }
 
@@ -1048,7 +1058,19 @@ fn worker_loop(
         .unwrap_or_default()
         .mode;
     let mut cached_remote: Option<(SignedUpdateManifest, UpdateManifest)> = None;
-    let mut next_scheduled_check = compute_next_check(config.startup_delay, 0);
+    let persistent = load_persistent_state(store.root());
+    let initial_delay = initial_check_delay(
+        config.startup_delay,
+        config.check_interval,
+        persistent.last_checked_unix,
+        now_unix_secs(),
+    );
+    let initial_jitter = if initial_delay > config.startup_delay {
+        config.jitter_max_seconds
+    } else {
+        0
+    };
+    let mut next_scheduled_check = compute_next_check(initial_delay, initial_jitter);
 
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
@@ -1465,6 +1487,22 @@ fn update_snapshot(
     }
 }
 
+fn initial_check_delay(
+    startup_delay: Duration,
+    check_interval: Duration,
+    last_checked_unix: Option<u64>,
+    now_unix: u64,
+) -> Duration {
+    let Some(last) = last_checked_unix else {
+        return startup_delay;
+    };
+    if now_unix < last {
+        return startup_delay;
+    }
+    let elapsed = Duration::from_secs(now_unix - last);
+    check_interval.saturating_sub(elapsed).max(startup_delay)
+}
+
 fn compute_next_check(base: Duration, jitter_max_seconds: u64) -> Instant {
     if jitter_max_seconds == 0 {
         return Instant::now() + base;
@@ -1849,5 +1887,28 @@ mod tests {
         cleanup_stale_artifacts(store.root(), "1.0.65");
         assert!(!pending_manifest_path(store.root()).exists());
         let _ = server.join();
+    }
+
+    #[test]
+    fn daily_check_schedule_respects_recent_check_across_restarts() {
+        let startup = Duration::from_secs(90);
+        let daily = Duration::from_hours(24);
+        assert_eq!(initial_check_delay(startup, daily, None, 100_000), startup);
+        assert_eq!(
+            initial_check_delay(startup, daily, Some(100_000 - 3600), 100_000),
+            Duration::from_hours(23)
+        );
+        assert_eq!(
+            initial_check_delay(startup, daily, Some(100_000 - 86_380), 100_000),
+            startup
+        );
+        assert_eq!(
+            initial_check_delay(startup, daily, Some(100_000 - 90_000), 100_000),
+            startup
+        );
+        assert_eq!(
+            initial_check_delay(startup, daily, Some(100_500), 100_000),
+            startup
+        );
     }
 }

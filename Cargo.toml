@@ -1,6 +1,6 @@
 [package]
 name = "pierdesk"
-version = "1.0.66"
+version = "1.0.67"
 edition = "2024"
 authors = ["micky-meecky"]
 license = "GPL-3.0-only"

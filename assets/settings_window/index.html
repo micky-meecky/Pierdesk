@@ -139,6 +139,30 @@
       color: var(--muted);
       white-space: nowrap;
     }
+    .update-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 38px;
+      padding: 0 14px;
+      border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
+      border-radius: 999px;
+      background: var(--red-soft);
+      color: var(--red);
+      font-weight: 600;
+      white-space: nowrap;
+      transition: background .15s ease, transform .15s ease;
+    }
+    .update-pill:hover {
+      background: color-mix(in srgb, var(--red) 18%, var(--surface-raised));
+    }
+    .update-pill .dot.red {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--red);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 22%, transparent);
+    }
     .window-controls { display: flex; gap: 4px; }
     .window-button { width: 42px; height: 38px; border: 0; border-radius: 7px; color: var(--text); background: transparent; }
     .window-button:hover { background: var(--control-hover); }
@@ -880,6 +904,7 @@
       '请先开启跨屏控制':'Turn on cross-screen control first', '两台电脑需同时在线才能切换':'Both computers must be online to switch',
       '与此设备的跨屏控制：':'Cross-screen control with ',
       '软件更新':'Software updates',
+      '有新版本':'Update available',
       '自动更新策略':'Update policy',
       '自动静默更新':'Automatic silent updates',
       '仅提醒我':'Notify me only',
@@ -1075,13 +1100,22 @@
       const m = currentModel();
       const language = m.language || 'en';
       const onlinePeerCount = (m.peers || []).filter(peer => peer.online).length;
-      const signature = `${language}|${m.theme === 'dark' ? 'dark' : 'light'}|${onlinePeerCount}`;
+      const upd = m.autoUpdate || {};
+      const hasUpdate = Boolean(upd.availableVersion && ['update_available', 'ready_to_install', 'needs_elevation'].includes(upd.phase));
+      const signature = `${language}|${m.theme === 'dark' ? 'dark' : 'light'}|${onlinePeerCount}|${hasUpdate ? upd.availableVersion : ''}|${hasUpdate ? upd.phase : ''}`;
       if (state.topbarSignature === signature) return;
       state.topbarSignature = signature;
       const topbar = root.querySelector('.topbar');
       if (!topbar) return;
+      const updateTitle = language === 'en'
+        ? `Version ${upd.availableVersion} available — click to review`
+        : `发现新版本 v${upd.availableVersion}，点击查看更新`;
+      const updatePill = hasUpdate
+        ? `<button class="update-pill" data-action="open-update-section" title="${escapeHtml(updateTitle)}"><span class="dot red"></span><span>有新版本</span></button>`
+        : '';
       topbar.innerHTML = `<div class="brand"><img src="__PIERDESK_ICON__" alt=""><strong>Pierdesk 设置</strong></div>
           <div class="top-actions">
+            ${updatePill}
             <button class="appearance-toggle" data-action="toggle-theme" title="切换亮色/暗色模式" aria-label="切换亮色/暗色模式">${svg(m.theme === 'dark' ? 'sun' : 'moon')}<span>${m.theme === 'dark' ? '亮色模式' : '暗色模式'}</span></button>
             <div class="connection-pill"><span class="dot ${onlinePeerCount ? 'green' : ''}"></span>${onlinePeerCount ? `${onlinePeerCount} 台设备在线` : '尚未连接'}</div>
             <div class="window-controls">
@@ -1501,7 +1535,7 @@
           ? `<button class="button primary" data-action="download-update">下载并更新</button>`
           : '';
       const notesBtn = u.notesUrl ? `<button class="button ghost" data-action="open-update-notes">查看更新日志</button>` : '';
-      return `<div class="section-title"><h2>软件更新</h2></div>
+      return `<div class="section-title" id="software-update-section"><h2>软件更新</h2></div>
         <article class="card general-card">
           <div class="general-row">
             <span class="round-icon ${badgeColor==='green'?'green':''}">${svg('refresh','large')}</span>
@@ -1858,6 +1892,12 @@
       else if (action === 'toggle-auto-popup') send({action:'set-auto-popup',enabled:!m.transfer.autoPopup});
       else if (action === 'toggle-autostart') send({action:'set-autostart',enabled:!m.autostart});
       else if (action === 'check-updates') send({action:'check-updates'});
+      else if (action === 'open-update-section') {
+        navigate('general');
+        requestAnimationFrame(() => {
+          document.getElementById('software-update-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      }
       else if (action === 'download-update') send({action:'download-update'});
       else if (action === 'apply-update') send({action:'apply-update'});
       else if (action === 'open-update-notes') send({action:'open-update-notes'});
